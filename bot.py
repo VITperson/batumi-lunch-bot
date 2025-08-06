@@ -1,8 +1,7 @@
 # Основной файл Telegram-бота для заказа обедов
 # Для работы требуется заполнить BOT_TOKEN и ADMIN_ID
 
-BOT_TOKEN = "7730673288:AAFJ1MU6J_QHC4PrtDwoTnHM7QrrXHKBiWQ"
-ADMIN_ID = 323515998  # Telegram user ID @vitperson
+from config_secret import BOT_TOKEN, ADMIN_ID
 
 import logging
 import json
@@ -27,6 +26,8 @@ def load_menu():
 
 # Стартовая команда
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Сброс состояния и user_data
+    context.user_data.clear()
     keyboard = [[KeyboardButton("Показать меню на неделю")], [KeyboardButton("Заказать обед")]]
     await update.message.reply_text(
         "Добро пожаловать! Выберите действие:",
@@ -114,7 +115,7 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return MENU
     else:
         # Если нет, запрашиваем адрес и телефон
-        reply_text = f"В {day} вам будет доставлено {count} {menu_for_day}. Пожалуйста, уточните ваш адрес и номер телефона:"
+        reply_text = f"В {day} вам будет доставлено {count} {menu_for_day}. \n\nПожалуйста, уточните ваш адрес и номер телефона:"
         await update.message.reply_text(reply_text)
         return ORDER_COUNT
 
@@ -141,7 +142,7 @@ async def address_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Ошибка отправки админу: {e}")
     keyboard = [[KeyboardButton("Посмотреть меню")], [KeyboardButton("Выбрать еще один день")]]
     await update.message.reply_text(
-        "Спасибо, ваш заказ принят, ожидайте получения…\nЧто дальше?",
+        f"Спасибо, ваш заказ принят, ожидайте получения заказа в {day}\nВы можете сделать новый заказ или посмотреть меню. Выберите одну из опций.",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
     return MENU
@@ -173,7 +174,7 @@ if __name__ == "__main__":
                 MessageHandler(filters.TEXT & ~filters.COMMAND, address_phone)
             ]
         },
-        fallbacks=[MessageHandler(filters.ALL, fallback)]
+        fallbacks=[CommandHandler("start", start), MessageHandler(filters.ALL, fallback)]
     )
     application.add_handler(conv_handler)
     logging.info("Бот запущен.")
