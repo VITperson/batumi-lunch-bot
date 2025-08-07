@@ -24,36 +24,47 @@ def load_menu():
         logging.error(f"Ошибка загрузки меню: {e}")
         return None
 
+def log_user_action(user, action):
+    username = f"@{user.username}" if user.username else "(нет username)"
+    logging.info(f"User {user.id} {username}: {action}")
+
 # Стартовая команда
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_user_action(update.message.from_user, "start")
     # Сброс состояния и user_data
     context.user_data.clear()
-    keyboard = [[KeyboardButton("Показать меню на неделю")], [KeyboardButton("Заказать обед")]]
+    keyboard = [[KeyboardButton("Показать меню на неделю"), KeyboardButton("Заказать обед")], [KeyboardButton("/start")]]
     await update.message.reply_text(
-        "Добро пожаловать! Выберите действие:",
+        "Добро пожаловать! \nЗдесь вы можете ознакомиться с меню на эту неделю или сразу заказать обед.\nВыберите одну из двух опций:",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
     return MENU
 
+async def add_start_button():
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("/start")]], resize_keyboard=True
+    )
+
 # Обработка кнопки "Показать меню на неделю"
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_user_action(update.message.from_user, "show_menu")
     menu_data = load_menu()
     if not menu_data:
-        await update.message.reply_text("Техническая ошибка: меню недоступно. Попробуйте позже.")
+        await update.message.reply_text("Техническая ошибка: меню недоступно. Попробуйте позже.", reply_markup=await add_start_button())
         return MENU
     text = f"Неделя: {menu_data['week']}\n"
     for day, items in menu_data['menu'].items():
         text += f"{day}: {items}\n"
-    await update.message.reply_text(text)
-    # Кнопка "Да" для заказа
-    keyboard = [[KeyboardButton("Да")]]
+    await update.message.reply_text(text, reply_markup=await add_start_button())
+    keyboard = [[KeyboardButton("Да")], [KeyboardButton("/start")]]
     await update.message.reply_text("Заказать ли обед?", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
     return ORDER_DAY
 
 # Обработка кнопки "Заказать обед" или "Да"
 async def order_lunch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_user_action(update.message.from_user, "order_lunch")
     days = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница"]
-    keyboard = [[KeyboardButton(day)] for day in days]
+    keyboard = [[KeyboardButton(day)] for day in days] + [[KeyboardButton("/start")]]
     await update.message.reply_text(
         "Выберите день недели:",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -62,15 +73,16 @@ async def order_lunch(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Обработка выбора дня недели
 async def select_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_user_action(update.message.from_user, f"select_day: {update.message.text}")
     day = update.message.text
     menu_data = load_menu()
     if not menu_data or day not in menu_data['menu']:
-        await update.message.reply_text("Ошибка: выберите день недели из списка.")
+        await update.message.reply_text("Ошибка: выберите день недели из списка.", reply_markup=await add_start_button())
         return ORDER_DAY
     # Сохраняем выбранный день в context.user_data
     context.user_data['selected_day'] = day
     # Кнопки для выбора количества обедов
-    keyboard = [[KeyboardButton(f"{i} обед{'' if i == 1 else 'а'}")] for i in range(1, 5)]
+    keyboard = [[KeyboardButton(f"{i} обед{'' if i == 1 else 'а'}")] for i in range(1, 5)] + [[KeyboardButton("/start")]]
     await update.message.reply_text(
         "Сколько обедов заказать?",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -78,10 +90,11 @@ async def select_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ORDER_COUNT
 
 async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_user_action(update.message.from_user, f"select_count: {update.message.text}")
     count_text = update.message.text
     valid_counts = ["1 обед", "2 обеда", "3 обеда", "4 обеда"]
     if count_text not in valid_counts:
-        await update.message.reply_text("Пожалуйста, выберите количество обедов с помощью кнопок.")
+        await update.message.reply_text("Пожалуйста, выберите количество обедов с помощью кнопок.", reply_markup=await add_start_button())
         return ORDER_COUNT
     count = count_text.split()[0]
     day = context.user_data.get('selected_day', '(не выбран)')
@@ -107,7 +120,7 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=ADMIN_ID, text=admin_text)
         except Exception as e:
             logging.error(f"Ошибка отправки админу: {e}")
-        keyboard = [[KeyboardButton("Посмотреть меню")], [KeyboardButton("Выбрать еще один день")]]
+        keyboard = [[KeyboardButton("Посмотреть меню")], [KeyboardButton("Выбрать еще один день")], [KeyboardButton("/start")]]
         await update.message.reply_text(
             f"В {day} вам будет доставлено {count} {menu_for_day}.\nСпасибо, ваш заказ принят, ожидайте получения…\nЧто дальше?",
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -116,10 +129,12 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         # Если нет, запрашиваем адрес и телефон
         reply_text = f"В {day} вам будет доставлено {count} {menu_for_day}. \n\nПожалуйста, уточните ваш адрес и номер телефона:"
-        await update.message.reply_text(reply_text)
+        keyboard = [[KeyboardButton("/start")]]
+        await update.message.reply_text(reply_text, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
         return ORDER_COUNT
 
 async def address_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_user_action(update.message.from_user, f"address_phone: {update.message.text}")
     address_phone_text = update.message.text
     # Сохраняем адрес и телефон для будущих заказов
     context.user_data['address_phone'] = address_phone_text
@@ -140,7 +155,7 @@ async def address_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=ADMIN_ID, text=admin_text)
     except Exception as e:
         logging.error(f"Ошибка отправки админу: {e}")
-    keyboard = [[KeyboardButton("Посмотреть меню")], [KeyboardButton("Выбрать еще один день")]]
+    keyboard = [[KeyboardButton("Посмотреть меню")], [KeyboardButton("Выбрать еще один день")], [KeyboardButton("/start")]]
     await update.message.reply_text(
         f"Спасибо, ваш заказ принят, ожидайте получения заказа в {day}\nВы можете сделать новый заказ или посмотреть меню. Выберите одну из опций.",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -149,7 +164,8 @@ async def address_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Обработка некорректных действий
 async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Пожалуйста, используйте кнопки для навигации.")
+    log_user_action(update.message.from_user, f"fallback: {update.message.text}")
+    await update.message.reply_text("Пожалуйста, используйте кнопки для навигации.", reply_markup=await add_start_button())
     return MENU
 
 # Основная функция запуска
