@@ -4,3 +4,8 @@ __pycache__/
 *.pyc
 users.json
 config_secret.py
+bot.log
+bot_state.pickle
+orders.json
+menu.jpg
+.DS_Store
