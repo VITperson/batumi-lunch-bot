@@ -17,6 +17,16 @@ import re
 import secrets
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler, PicklePersistence
+from keyboards import (
+    add_start_button,
+    get_main_menu_keyboard,
+    get_day_keyboard,
+    get_count_keyboard,
+    get_count_retry_keyboard,
+    get_confirm_keyboard,
+    get_contact_keyboard,
+    get_address_keyboard,
+)
 
 from telegram.constants import ParseMode
 from logging.handlers import TimedRotatingFileHandler
@@ -168,93 +178,6 @@ def set_user_profile(uid: int, profile: dict) -> None:
     data[str(uid)] = profile
     _save_users(data)
 
-# Вспомогательные функции/клавиатуры
-
-def add_start_button():
-    return ReplyKeyboardMarkup([[KeyboardButton("🔄 Restart bot"), KeyboardButton("❗ Связаться с человеком")]], resize_keyboard=True)
-
-# Новая функция для клавиатуры с кнопкой Restart bot
-def add_restart_button():
-    return ReplyKeyboardMarkup([[KeyboardButton("🔄 Restart bot"), KeyboardButton("❗ Связаться с человеком")]], resize_keyboard=True)
-
-
-def get_main_menu_keyboard():
-    return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton("Показать меню на неделю"), KeyboardButton("Заказать обед")],
-            [KeyboardButton("🔄 Restart bot"), KeyboardButton("❗ Связаться с человеком")]
-        ],
-        resize_keyboard=True,
-    )
-
-
-def get_day_keyboard():
-    rows = [
-        [KeyboardButton("Понедельник"), KeyboardButton("Вторник")],
-        [KeyboardButton("Среда"), KeyboardButton("Четверг")],
-        [KeyboardButton("Пятница")],
-        [KeyboardButton("🔄 Restart bot"), KeyboardButton("❗ Связаться с человеком")],
-    ]
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
-
-
-
-def get_count_keyboard():
-    rows = [
-        [KeyboardButton("1 обед"), KeyboardButton("2 обеда")],
-        [KeyboardButton("3 обеда"), KeyboardButton("4 обеда")],
-        [KeyboardButton("Назад")],
-        [KeyboardButton("🔄 Restart bot"), KeyboardButton("❗ Связаться с человеком")],
-    ]
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
-
-# Новая клавиатура для выбора количества с кнопкой "Выбрать день заново"
-def get_count_retry_keyboard():
-    rows = [
-        [KeyboardButton("1 обед"), KeyboardButton("2 обеда")],
-        [KeyboardButton("3 обеда"), KeyboardButton("4 обеда")],
-        [KeyboardButton("Выбрать день заново")],
-        [KeyboardButton("Назад")],
-        [KeyboardButton("🔄 Restart bot"), KeyboardButton("❗ Связаться с человеком")],
-    ]
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
-
-
-def get_confirm_keyboard():
-    return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton("Да"), KeyboardButton("Изменить адрес")],
-            [KeyboardButton("Отправить телефон", request_contact=True)],
-            [KeyboardButton("Назад")],
-            [KeyboardButton("🔄 Restart bot"), KeyboardButton("❗ Связаться с человеком")]
-        ],
-        resize_keyboard=True,
-    )
-
-
-
-def get_contact_keyboard():
-    return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton("Отправить телефон", request_contact=True)],
-            [KeyboardButton("🔄 Restart bot"), KeyboardButton("❗ Связаться с человеком")],
-        ],
-        resize_keyboard=True,
-    )
-
-
-# Клавиатура для ввода адреса с кнопкой "Назад"
-def get_address_keyboard():
-    return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton("Назад")],
-            [KeyboardButton("🔄 Restart bot"), KeyboardButton("❗ Связаться с человеком")],
-        ],
-        resize_keyboard=True,
-    )
-
-
-
 def format_menu(menu_data: dict) -> str:
     lines = [f"Неделя: {menu_data['week']}"]
     for day, items in menu_data["menu"].items():
@@ -298,8 +221,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if saved_profile:
         context.user_data["profile"] = saved_profile
     caption = (
-        "*Добро пожаловать!*\n\n{Тут должна быть краткая информация о компании с полезными фактами, возможно со стоимостью обедов}\n\n"
-        "Вы можете:\n• _Посмотреть меню на неделю_\n• _Сразу оформить заказ_\n\nВыберите одну из опций ниже:"
+        "<b>Добро пожаловать!</b>\n\n{Тут должна быть краткая информация о компании с полезными фактами, возможно со стоимостью обедов}\n\n"
+        "Вы можете:\n• Посмотреть меню на неделю\n• Сразу оформить заказ\n\nВыберите одну из опций ниже:"
     )
     log_console("Пользователь начал работу с ботом")
     try:
@@ -307,14 +230,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_photo(
                 photo=logo,
                 caption=caption,
-                parse_mode=ParseMode.MARKDOWN,
+                parse_mode=ParseMode.HTML,
                 reply_markup=get_main_menu_keyboard(),
             )
     except FileNotFoundError:
         await update.message.reply_text(
             caption,
             reply_markup=get_main_menu_keyboard(),
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=ParseMode.HTML,
         )
     return MENU
 
@@ -331,25 +254,24 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open("Menu.jpg", "rb") as photo:
             await update.message.reply_photo(
                 photo=photo,
-                caption=text_html,
-                parse_mode=ParseMode.HTML,
                 reply_markup=add_start_button()
             )
     except FileNotFoundError:
-        await update.message.reply_text(text_html, parse_mode=ParseMode.HTML, reply_markup=add_start_button())
+        pass
+    await update.message.reply_text(text_html, parse_mode=ParseMode.HTML, reply_markup=add_start_button())
     keyboard = [
         [KeyboardButton("Да"), KeyboardButton("Выбрать день недели")],
         [KeyboardButton("🔄 Restart bot"), KeyboardButton("❗ Связаться с человеком")]
     ]
     await update.message.reply_text(
-        "*Заказать обед сейчас?*", parse_mode=ParseMode.MARKDOWN, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        "<b>Заказать обед сейчас?</b>", parse_mode=ParseMode.HTML, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
     return ORDER_DAY
 
 # Обработка кнопки "Заказать обед" или "Да"
 async def order_lunch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(update.message.from_user, "order_lunch")
-    await update.message.reply_text("*Выберите день недели:*", parse_mode=ParseMode.MARKDOWN, reply_markup=get_day_keyboard())
+    await update.message.reply_text("<b>Выберите день недели:</b>", parse_mode=ParseMode.HTML, reply_markup=get_day_keyboard())
     return ORDER_DAY
 # Обработка выбора дня недели
 async def select_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -357,11 +279,11 @@ async def select_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
     day = update.message.text
     menu_data = load_menu()
     if not menu_data or day not in menu_data['menu']:
-        await update.message.reply_text("*Ошибка:* выберите день недели из списка.", parse_mode=ParseMode.MARKDOWN, reply_markup=add_start_button())
+        await update.message.reply_text("<b>Ошибка:</b> выберите день недели из списка.", parse_mode=ParseMode.HTML, reply_markup=get_day_keyboard())
         return ORDER_DAY
     # Сохраняем выбранный день в context.user_data
     context.user_data['selected_day'] = day
-    await update.message.reply_text("*Сколько обедов заказать?*", parse_mode=ParseMode.MARKDOWN, reply_markup=get_count_keyboard())
+    await update.message.reply_text("<b>Сколько обедов заказать?</b>", parse_mode=ParseMode.HTML, reply_markup=get_count_keyboard())
     return ORDER_COUNT
 
 async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -370,8 +292,8 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     valid_counts = ["1 обед", "2 обеда", "3 обеда", "4 обеда"]
     if count_text not in valid_counts:
         await update.message.reply_text(
-            "*Пожалуйста, используйте кнопки* для выбора количества.",
-            parse_mode=ParseMode.MARKDOWN,
+            "Пожалуйста, используйте <b>кнопки</b> для выбора количества.",
+            parse_mode=ParseMode.HTML,
             reply_markup=get_count_retry_keyboard(),
         )
         return ORDER_COUNT
@@ -381,8 +303,8 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last_ts = context.user_data.get("last_order_ts")
     if last_ts and now - last_ts < 10:
         await update.message.reply_text(
-            "*Слишком часто.* Подождите немного и попробуйте снова или выберите другой день.",
-            parse_mode=ParseMode.MARKDOWN,
+            "<b>Слишком часто.</b> Подождите немного и попробуйте снова или выберите другой день.",
+            parse_mode=ParseMode.HTML,
             reply_markup=get_count_retry_keyboard(),
         )
         return ORDER_COUNT
@@ -472,20 +394,20 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if choice == 'изменить адрес':
         await update.message.reply_text(
-            "*Введите новый адрес доставки*\n\n"
-            "Укажите:\n"
-            " - улицу и дом\n"
-            " - подъезд/этаж/квартиру (если есть)\n"
-            " - ориентир для курьера",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=add_restart_button(),
+            "<b>Введите новый адрес доставки</b>\n\n"
+            "Укажите в одном сообщении:\n"
+            " • улицу и дом\n"
+            " • подъезд/этаж/квартиру (если есть)\n"
+            " • ориентир для курьера",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_address_keyboard(),
         )
         return ADDRESS
 
     if choice != 'да':
         # непредвиденный ввод - повторим вопрос
         await update.message.reply_text(
-            "Пожалуйста, выберите: *Да* или *Изменить адрес*.", parse_mode=ParseMode.MARKDOWN, reply_markup=get_confirm_keyboard()
+            "Пожалуйста, выберите: <b>Да</b> или <b>Изменить адрес</b>.", parse_mode=ParseMode.HTML, reply_markup=get_confirm_keyboard()
         )
         return CONFIRM
 
@@ -555,8 +477,10 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"День доставки: {day}, с 12:30 до 15:30.\n"
         f"Стоимость заказа {cost_lari} лари.\n"
         f"Оплатить можно наличными курьеру или переводом.\n\n"
-        f"Чтобы посмотреть детали позже, отправьте: /order {order_id}",
+        f"<b>Чтобы посмотреть детали позже:</b>\n"
+        f"<blockquote>/order {order_id}</blockquote>",
         reply_markup=keyboard,
+        parse_mode=ParseMode.HTML,
     )
     return MENU
 
@@ -565,8 +489,8 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Назад с подтверждения к выбору количества
 async def back_to_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "*Сколько обедов заказать?*",
-        parse_mode=ParseMode.MARKDOWN,
+        "<b>Сколько обедов заказать?</b>",
+        parse_mode=ParseMode.HTML,
         reply_markup=get_count_keyboard(),
     )
     return ORDER_COUNT
@@ -574,8 +498,8 @@ async def back_to_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Назад с выбора количества к выбору дня
 async def back_to_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "*Выберите день недели:*",
-        parse_mode=ParseMode.MARKDOWN,
+        "<b>Выберите день недели:</b>",
+        parse_mode=ParseMode.HTML,
         reply_markup=get_day_keyboard(),
     )
     return ORDER_DAY
@@ -753,7 +677,7 @@ async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = context.user_data.get('state', 'unknown')
     log_user_action(update.message.from_user, f"fallback state={state}")
     await update.message.reply_text(
-        "Пожалуйста, используйте *кнопки* для навигации.", parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_menu_keyboard()
+        "Пожалуйста, используйте <b>кнопки</b> для навигации.", parse_mode=ParseMode.HTML, reply_markup=get_main_menu_keyboard()
     )
     return MENU
 
@@ -766,18 +690,20 @@ async def my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Профиль не найден. Введите адрес и телефон при заказе.")
         return
     pretty = json.dumps(prof, ensure_ascii=False, indent=2)
-    await update.message.reply_text(f"*Ваш сохраненный профиль:*\n```\n{pretty}\n```", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"<b>Ваш сохраненный профиль:</b>\n<pre>{html.escape(pretty)}</pre>", parse_mode=ParseMode.HTML)
 
 
 # Handler for "Связаться с человеком" button
 async def contact_human(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = (
-        f"Связаться с оператором сервиса вы можете через Telegram {OPERATOR_HANDLE} "
-        f"или по телефону {OPERATOR_PHONE}"
-    )
-    # Не меняем клавиатуру: отправляем сообщение без reply_markup
-    await update.message.reply_text(msg)
-    # остаемся в текущем состоянии
+    handle = (OPERATOR_HANDLE or "").lstrip("@")
+    phone = OPERATOR_PHONE or ""
+    parts = []
+    if handle:
+        parts.append(f"Telegram: <a href=\"https://t.me/{html.escape(handle)}\">@{html.escape(handle)}</a>")
+    if phone:
+        parts.append(f"телефон: <a href=\"tel:{html.escape(phone)}\">{html.escape(phone)}</a>")
+    msg = "Связаться с оператором можно " + " или ".join(parts) if parts else "Контакты оператора временно недоступны."
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
     return
 
 # Универсальное логирование нажатий любых кнопок (ReplyKeyboard)
@@ -806,11 +732,25 @@ async def log_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message and update.message.text:
         log_user_action(update.message.from_user, f"button_click: {update.message.text}")
 
+#
+# Глобальный обработчик ошибок
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logging.exception("Unhandled exception", exc_info=context.error)
+    try:
+        from telegram import Update
+        if isinstance(update, Update) and update.effective_message:
+            await update.effective_message.reply_text(
+                "Упс, возникла техническая ошибка. Попробуйте еще раз чуть позже.")
+    except Exception:
+        pass
+
 # Основная функция запуска
 
 if __name__ == "__main__":
     persistence = PicklePersistence(filepath="bot_state.pickle")
     application = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
+
+    application.add_error_handler(error_handler)
 
     application.add_handler(CommandHandler("my_profile", my_profile))
     application.add_handler(CommandHandler("order", order_info))
@@ -854,22 +794,21 @@ if __name__ == "__main__":
             ],
             ADDRESS: [
                 MessageHandler(filters.Regex("^Назад$"), back_to_count),
+                MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
+                MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
                 MessageHandler((filters.TEXT | filters.CONTACT) & ~filters.COMMAND, address_phone),
                 MessageHandler(filters.Regex("^🔄 Restart bot$"), start),
                 MessageHandler(filters.Regex("^Restart bot$"), start),
-                MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
-                MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
             ],
             CONFIRM: [
                 MessageHandler(filters.Regex("^Назад$"), back_to_count),
-                MessageHandler(filters.Regex("^Отправить телефон$"), confirm_request_phone),
                 MessageHandler(filters.CONTACT, confirm_save_phone),
                 MessageHandler(filters.Regex("^(Да|Изменить адрес)$"), confirm_order),
                 MessageHandler(filters.Regex("^🔄 Restart bot$"), start),
                 MessageHandler(filters.Regex("^Restart bot$"), start),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_order),
                 MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_order),
             ],
         },
         fallbacks=[CommandHandler("start", start), MessageHandler(filters.ALL, fallback)]
