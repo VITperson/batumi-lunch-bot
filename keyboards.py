@@ -46,7 +46,7 @@ def get_count_retry_keyboard():
 def get_confirm_keyboard():
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("Да"), KeyboardButton("Изменить адрес")],
+            [KeyboardButton("Подтверждаю"), KeyboardButton("Изменить адрес")],
             [KeyboardButton("Отправить телефон", request_contact=True)],
             [KeyboardButton("Назад")],
             [KeyboardButton("🔄 Restart bot"), KeyboardButton("❗ Связаться с человеком")],

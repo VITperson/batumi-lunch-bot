@@ -5,6 +5,7 @@ __pycache__/
 users.json
 config_secret.py
 bot.log
+bot.log.*
 bot_state.pickle
 orders.json
 menu.jpg

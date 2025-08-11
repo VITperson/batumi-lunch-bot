@@ -221,8 +221,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if saved_profile:
         context.user_data["profile"] = saved_profile
     caption = (
-        "<b>Добро пожаловать!</b>\n\n{Тут должна быть краткая информация о компании с полезными фактами, возможно со стоимостью обедов}\n\n"
-        "Вы можете:\n• Посмотреть меню на неделю\n• Сразу оформить заказ\n\nВыберите одну из опций ниже:"
+        "<b>Добро пожаловать!</b>\n\n"
+        "🥗 Предлагаем доставку вкусных домашних обедов.\n"
+        "В обед входит:\n"
+        " - мясное блюдо (курица или свинина) 110 гр;\n"
+        " - гарнир 300 гр;\n"
+        " - салаты 250 гр.\n"
+        "Каждую неделю новое меню.\n"
+        "Бесплатная доставка в одноразовых порционных контейнерах.\n"
+        "🫰 <b>Стоимость: 15 лари</b>\n\n"
+        "За подробностями/заказами обращайтесь по телефону: "
+        "<a href=\"tel:+995599526391\">+995599526391</a>\n"
+        "Telegram: <a href=\"https://t.me/obedy_dostavka\">@obedy_dostavka</a>\n\n"
+        "С помощью бота Вы можете:\n• Посмотреть меню на эту неделю\n• Сразу оформить заказ\n\nВыберите одну из опций ниже:"
     )
     log_console("Пользователь начал работу с ботом")
     try:
@@ -251,7 +262,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return MENU
     text_html = format_menu_html(menu_data)
     try:
-        with open("Menu.jpg", "rb") as photo:
+        with open("Menu.jpeg", "rb") as photo:
             await update.message.reply_photo(
                 photo=photo,
                 reply_markup=add_start_button()
@@ -404,10 +415,10 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ADDRESS
 
-    if choice != 'да':
+    if choice != 'подтверждаю':
         # непредвиденный ввод - повторим вопрос
         await update.message.reply_text(
-            "Пожалуйста, выберите: <b>Да</b> или <b>Изменить адрес</b>.", parse_mode=ParseMode.HTML, reply_markup=get_confirm_keyboard()
+            "Пожалуйста, выберите: <b>Подтверждаю</b> или <b>Изменить адрес</b>.", parse_mode=ParseMode.HTML, reply_markup=get_confirm_keyboard()
         )
         return CONFIRM
 
@@ -699,10 +710,10 @@ async def contact_human(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone = OPERATOR_PHONE or ""
     parts = []
     if handle:
-        parts.append(f"Telegram: <a href=\"https://t.me/{html.escape(handle)}\">@{html.escape(handle)}</a>")
+        parts.append(f"\nTelegram: <a href=\"https://t.me/{html.escape(handle)}\">@{html.escape(handle)}</a>")
     if phone:
-        parts.append(f"телефон: <a href=\"tel:{html.escape(phone)}\">{html.escape(phone)}</a>")
-    msg = "Связаться с оператором можно " + " или ".join(parts) if parts else "Контакты оператора временно недоступны."
+        parts.append(f"\nпо телефону: <a href=\"tel:{html.escape(phone)}\">{html.escape(phone)}</a>")
+    msg = "Связаться с оператором можно через " + "\nили ".join(parts) if parts else "Контакты оператора временно недоступны."
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
     return
 
@@ -717,6 +728,7 @@ BUTTON_TEXTS = [
     "Понедельник", "Вторник", "Среда", "Четверг", "Пятница",
     "1 обед", "2 обеда", "3 обеда", "4 обеда",
     "Да",
+    "Подтверждаю",
     "Изменить адрес",
     "Назад",
     "Отправить телефон",
@@ -803,7 +815,7 @@ if __name__ == "__main__":
             CONFIRM: [
                 MessageHandler(filters.Regex("^Назад$"), back_to_count),
                 MessageHandler(filters.CONTACT, confirm_save_phone),
-                MessageHandler(filters.Regex("^(Да|Изменить адрес)$"), confirm_order),
+                MessageHandler(filters.Regex("^(Подтверждаю|Изменить адрес)$"), confirm_order),
                 MessageHandler(filters.Regex("^🔄 Restart bot$"), start),
                 MessageHandler(filters.Regex("^Restart bot$"), start),
                 MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
