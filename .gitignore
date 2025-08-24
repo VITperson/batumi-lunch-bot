@@ -1,6 +1,7 @@
 venv/
 other/
 __pycache__/
+old menus
 *.pyc
 users.json
 config_secret.py

@@ -9,14 +9,14 @@ try:
     from config_secret import OPERATOR_HANDLE, OPERATOR_PHONE
 except Exception:
     OPERATOR_HANDLE = "@vitperson"
-    OPERATOR_PHONE = "+995 000 000 000"
+    OPERATOR_PHONE = "недоступен"
 
 import logging
 import json
 import re
 import secrets
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler, PicklePersistence
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters, ConversationHandler, PicklePersistence
 from keyboards import (
     add_start_button,
     get_main_menu_keyboard,
@@ -26,16 +26,22 @@ from keyboards import (
     get_confirm_keyboard,
     get_contact_keyboard,
     get_address_keyboard,
+    get_after_confirm_keyboard,
+    get_admin_main_keyboard,
+    get_admin_report_keyboard,
 )
 
+from datetime import datetime, timedelta
 from telegram.constants import ParseMode
 from logging.handlers import TimedRotatingFileHandler
 import time
 import os
 import html
+import asyncio
 
 USERS_FILE = "users.json"
 ORDERS_FILE = "orders.json"
+PRICE_LARI = 15
 
 # Состояния для ConversationHandler
 MENU, ORDER_DAY, ORDER_COUNT, ADDRESS, CONFIRM = range(5)
@@ -178,6 +184,43 @@ def set_user_profile(uid: int, profile: dict) -> None:
     data[str(uid)] = profile
     _save_users(data)
 
+
+def ensure_user_registered(uid: int) -> None:
+    """Гарантирует наличие записи пользователя в users.json."""
+    data = _load_users()
+    key = str(uid)
+    if key not in data:
+        data[key] = data.get(key, {})
+        _save_users(data)
+
+
+def get_broadcast_recipients() -> list[int]:
+    """Собирает список chat_id для рассылки: все, кто есть в users.json и в orders.json. Админа исключаем."""
+    uids: set[int] = set()
+    try:
+        for k in _load_users().keys():
+            try:
+                uids.add(int(k))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        for _, payload in _load_orders().items():
+            uid = payload.get("user_id")
+            if uid is not None:
+                try:
+                    uids.add(int(uid))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    try:
+        uids.discard(int(ADMIN_ID))
+    except Exception:
+        pass
+    return sorted(uids)
+
 def format_menu(menu_data: dict) -> str:
     lines = [f"Неделя: {menu_data['week']}"]
     for day, items in menu_data["menu"].items():
@@ -216,10 +259,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(update.message.from_user, "start")
     # Сброс состояния и user_data
     context.user_data.clear()
+    is_admin = update.effective_user.id == ADMIN_ID
+    if is_admin:
+        admin_caption = (
+            "<b>Режим администратора</b>\n\n"
+            "📊 <b>Отчеты</b>:\n"
+            "1) Нажмите «Показать заказы на эту неделю».\n"
+            "2) Выберите «Неделя целиком» или нужный день.\n"
+            "3) Детали заказа: отправьте <code>/order ID</code>.\n\n"
+            "📣 <b>Рассылка</b>: <code>/sms текст</code>"
+        )
+        try:
+            with open("Admin.png", "rb") as logo:
+                await update.message.reply_photo(
+                    photo=logo,
+                    caption=admin_caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_admin_main_keyboard(),
+                )
+        except FileNotFoundError:
+            await update.message.reply_text(
+                admin_caption,
+                reply_markup=get_admin_main_keyboard(),
+                parse_mode=ParseMode.HTML,
+            )
+        return MENU
     # Подтягиваем сохраненный профиль из users.json, если есть
     saved_profile = get_user_profile(update.effective_user.id)
     if saved_profile:
         context.user_data["profile"] = saved_profile
+    # Регистрируем пользователя для последующих рассылок
+    ensure_user_registered(update.effective_user.id)
     caption = (
         "<b>Добро пожаловать!</b>\n\n"
         "🥗 Предлагаем доставку вкусных домашних обедов.\n"
@@ -253,8 +323,144 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return MENU
 
 
-# Обработка кнопки "Показать меню на неделю"
+async def admin_show_week_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("Недоступно.")
+        return MENU
+
+    await update.message.reply_text(
+        "<b>Выберите отчет:</b>\nНеделя целиком или конкретный день.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_admin_report_keyboard(),
+    )
+    return MENU
+
+
+# Новая функция генерации отчета по выбору администратора
+async def admin_report_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("Недоступно.")
+        return MENU
+
+    selection = (update.message.text or "").strip()
+    if selection not in {"Неделя целиком","Понедельник","Вторник","Среда","Четверг","Пятница"}:
+        await update.message.reply_text("Выберите вариант из клавиатуры.", reply_markup=get_admin_report_keyboard())
+        return MENU
+
+    day_filter = None if selection == "Неделя целиком" else selection
+
+    now = datetime.now()
+    monday = now - timedelta(days=now.weekday())
+    start_dt = datetime(monday.year, monday.month, monday.day, 0, 0, 0)
+    end_dt = start_dt + timedelta(days=6, hours=23, minutes=59, seconds=59)
+    start_ts = int(start_dt.timestamp())
+    end_ts = int(end_dt.timestamp())
+
+    orders = _load_orders()
+    week_orders = []
+    for oid, payload in orders.items():
+        ts = int(payload.get("created_at") or 0)
+        dname = str(payload.get("day") or "")
+        if start_ts <= ts <= end_ts and (day_filter is None or dname == day_filter):
+            p = dict(payload)
+            p["__id"] = oid
+            week_orders.append(p)
+
+    day_order = {"Понедельник":0, "Вторник":1, "Среда":2, "Четверг":3, "Пятница":4, "Суббота":5, "Воскресенье":6}
+    week_orders.sort(key=lambda x: (day_order.get(str(x.get("day")), 99), int(x.get("created_at") or 0)))
+
+    totals_by_day = {}
+    grand = 0
+    for o in week_orders:
+        try:
+            cnt = int(str(o.get("count",1)).split()[0])
+        except Exception:
+            cnt = 1
+        grand += cnt
+        d = str(o.get("day") or "-")
+        b = totals_by_day.setdefault(d, {"count": 0, "items": []})
+        b["count"] += cnt
+        b["items"].append(o)
+
+    menu_data = load_menu() or {}
+    week_label = menu_data.get("week") or "эта неделя"
+
+    if day_filter:
+        header = f"<b>📊 Заказы за день:</b> {html.escape(day_filter)}"
+    else:
+        header = f"<b>📊 Заказы за неделю:</b> {html.escape(str(week_label))}"
+
+    lines = [header]
+    if not week_orders:
+        lines.append("Заказов пока нет.")
+    else:
+        days_iter = [day_filter] if day_filter else ["Понедельник","Вторник","Среда","Четверг","Пятница","Суббота","Воскресенье"]
+        for d_name in days_iter:
+            b = totals_by_day.get(d_name)
+            if not b:
+                continue
+            day_sum = b["count"] * PRICE_LARI
+            lines.append(f"\n<b>{html.escape(d_name)}</b> - {b['count']} шт. / {day_sum} лари")
+            for o in b["items"]:
+                oid = o.get("__id")
+                try:
+                    cnt = int(str(o.get("count",1)).split()[0])
+                except Exception:
+                    cnt = 1
+                addr_txt = str(o.get("address") or "-").strip()
+                uid = int(o.get("user_id") or 0)
+                uname = o.get("username") or ""
+                uname_tag = f"@{uname}" if uname else ""
+                cust = f"<a href=\"tg://user?id={uid}\">{uid}</a>" if uid else "-"
+                username_part = f" {html.escape(uname_tag)}" if uname_tag else ""
+                lines.append(f"• <code>/order {html.escape(oid)}</code> ×{cnt} - {html.escape(addr_txt)} - {cust}{username_part}")
+        lines.append(f"\n<b>Итого:</b> {grand} шт. / {grand*PRICE_LARI} лари")
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=get_admin_report_keyboard())
+    return MENU
+
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Админская рассылка: /sms <текст>. Поддерживается HTML-разметка."""
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("Недоступно.")
+        return
+
+    # Текст берем из аргументов команды
+    text = " ".join(context.args) if getattr(context, "args", None) else ""
+    if not text:
+        await update.message.reply_text("Использование: /sms <текст>\nМожно использовать HTML-разметку.")
+        return
+
+    recipients = get_broadcast_recipients()
+    if not recipients:
+        await update.message.reply_text("Нет получателей для рассылки.")
+        return
+
+    sent = 0
+    failed = 0
+    for uid in recipients:
+        try:
+            await context.bot.send_message(chat_id=uid, text=text, parse_mode=ParseMode.HTML)
+            sent += 1
+        except Exception as e:
+            logging.warning(f"Broadcast failed for {uid}: {e}")
+            failed += 1
+        await asyncio.sleep(0.05)  # анти-спам лимиты Telegram
+
+    await update.message.reply_text(
+        f"Рассылка завершена: отправлено {sent}, ошибок {failed}. Получателей: {len(recipients)}.")
+
+
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id == ADMIN_ID:
+        await update.message.reply_text(
+            "Вы админ. Используйте кнопку: Показать заказы на эту неделю.",
+            reply_markup=get_admin_main_keyboard(),
+        )
+        return MENU
     log_user_action(update.message.from_user, "show_menu")
     menu_data = load_menu()
     if not menu_data:
@@ -270,17 +476,19 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except FileNotFoundError:
         pass
     await update.message.reply_text(text_html, parse_mode=ParseMode.HTML, reply_markup=add_start_button())
-    keyboard = [
-        [KeyboardButton("Да"), KeyboardButton("Выбрать день недели")],
-        [KeyboardButton("🔄 Restart bot"), KeyboardButton("❗ Связаться с человеком")]
-    ]
     await update.message.reply_text(
-        "<b>Заказать обед сейчас?</b>", parse_mode=ParseMode.HTML, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        "<b>Выберите день недели:</b>", parse_mode=ParseMode.HTML, reply_markup=get_day_keyboard()
     )
     return ORDER_DAY
 
 # Обработка кнопки "Заказать обед" или "Да"
 async def order_lunch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id == ADMIN_ID:
+        await update.message.reply_text(
+            "Вы админ. Используйте кнопку: Показать заказы на эту неделю.",
+            reply_markup=get_admin_main_keyboard(),
+        )
+        return MENU
     log_user_action(update.message.from_user, "order_lunch")
     await update.message.reply_text("<b>Выберите день недели:</b>", parse_mode=ParseMode.HTML, reply_markup=get_day_keyboard())
     return ORDER_DAY
@@ -292,9 +500,25 @@ async def select_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not menu_data or day not in menu_data['menu']:
         await update.message.reply_text("<b>Ошибка:</b> выберите день недели из списка.", parse_mode=ParseMode.HTML, reply_markup=get_day_keyboard())
         return ORDER_DAY
-    # Сохраняем выбранный день в context.user_data
+    # Сохраняем выбранный день и показываем меню этого дня
     context.user_data['selected_day'] = day
-    await update.message.reply_text("<b>Сколько обедов заказать?</b>", parse_mode=ParseMode.HTML, reply_markup=get_count_keyboard())
+
+    menu_for_day = menu_data['menu'][day]
+    if isinstance(menu_for_day, list):
+        menu_for_day_text = ", ".join(str(it).strip() for it in menu_for_day)
+        menu_lines_html = "\n".join(f" - {html.escape(str(it).strip())}" for it in menu_for_day if str(it).strip())
+    else:
+        menu_for_day_text = str(menu_for_day).strip()
+        menu_lines_html = f" - {html.escape(menu_for_day_text)}"
+
+    # Сохраним текст меню в user_data, пригодится на подтверждении
+    context.user_data['menu_for_day'] = menu_for_day_text
+
+    await update.message.reply_text(
+        f"<b>{html.escape(day)}</b>\n{menu_lines_html}\n\n<b>Сколько обедов заказать?</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_count_keyboard(),
+    )
     return ORDER_COUNT
 
 async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -353,11 +577,17 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
         menu_lines_html = "\n".join(
             f" - {html.escape(it.strip())}" for it in str(menu_for_day_text).split(',') if it.strip()
         )
+        try:
+            count_int = int(str(count))
+        except Exception:
+            count_int = 1
+        cost_lari = count_int * PRICE_LARI
         confirm_text = (
             f"<b>Подтвердите заказ</b>\n\n"
             f"<b>День:</b> {html.escape(day)}\n"
             f"<b>Количество:</b> {html.escape(str(count))}\n"
             f"<b>Меню:</b>\n{menu_lines_html}\n\n"
+            f"<b>Сумма к оплате:</b> {cost_lari} лари\n\n"
             f"<b>Адрес доставки:</b>\n{html.escape(addr or '')}\n"
             f"<b>Телефон:</b> {html.escape(phone_line)}\n\n"
             f"Все верно?"
@@ -432,7 +662,7 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count_int = int(str(count))
     except Exception:
         count_int = 1
-    cost_lari = count_int * 15
+    cost_lari = count_int * PRICE_LARI
     prep = _prep_for_day(day)
 
     user = update.message.from_user
@@ -452,21 +682,34 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "created_at": created_at,
     })
 
-    admin_text = (
-        f"<b>Новый заказ!</b>\n"
-        f"ID заказа: {html.escape(order_id)}\n"
-        f"День недели: {html.escape(day)}\n"
-        f"Количество обедов: {html.escape(str(count))}\n"
-        f"Меню: {html.escape(menu_for_day)}\n"
-        f"Клиент: {admin_link_html(user)} ({html.escape(username)})\n"
-        f"Адрес: {html.escape(profile.get('address') or '')}\n"
-        f"Телефон: {html.escape(profile.get('phone') or 'не указан')}"
+    menu_lines_html = "\n".join(
+        f"• {html.escape(it.strip())}" for it in str(menu_for_day).split(',') if it.strip()
     )
-    log_console(f"Заказ от пользователя {user.id}")
+    created_line = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_at))
+
+    admin_text = (
+        f"<b>🍱 Новый заказ</b> <code>{html.escape(order_id)}</code>\n"
+        f"<b>Создан:</b> {created_line}\n"
+        f"<b>Клиент:</b> {admin_link_html(user)} ({html.escape(username)})\n"
+        f"<b>День:</b> {html.escape(day)}\n"
+        f"<b>Меню:</b>\n{menu_lines_html}\n"
+        f"<b>Количество:</b> {html.escape(str(count))}\n"
+        f"<b>Сумма:</b> {cost_lari} лари (по {PRICE_LARI} лари за обед)\n"
+        f"<b>Адрес:</b>\n<blockquote>{html.escape(profile.get('address') or '')}</blockquote>\n"
+        f"<b>Телефон:</b> {html.escape(profile.get('phone') or 'не указан')}\n\n"
+        f"<b>Быстрый просмотр:</b> <code>/order {html.escape(order_id)}</code>"
+    )
+    admin_id = ADMIN_ID
+    admin_handle = OPERATOR_HANDLE if 'OPERATOR_HANDLE' in globals() and OPERATOR_HANDLE else ""
+    log_console(f"Заказ от пользователя {user.id}. Готовлю отправку админу {admin_id} {admin_handle}")
     try:
-        await context.bot.send_message(chat_id=ADMIN_ID, text=admin_text, parse_mode=ParseMode.HTML)
+        await context.bot.send_message(chat_id=admin_id, text=admin_text, parse_mode=ParseMode.HTML)
+        logging.info(
+            f"ORDER_SENT_TO_ADMIN order_id={order_id} admin_id={admin_id} admin_handle={admin_handle or '-'} user_id={user.id}"
+        )
+        log_console(f"Заказ {order_id} отправлен администратору {admin_id} {admin_handle}")
     except Exception as e:
-        logging.error(f"Ошибка отправки админу: {e}")
+        logging.error(f"Ошибка отправки админу {admin_id} {admin_handle}: {e}")
 
     # Гифка об успешном оформлении
     await send_success_gif(update)
@@ -474,24 +717,27 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['last_order_ts'] = time.time()
     context.user_data.pop('pending_order', None)
 
-    keyboard = ReplyKeyboardMarkup(
-        [
-            [KeyboardButton("Посмотреть меню")],
-            [KeyboardButton("Выбрать еще один день")],
-            [KeyboardButton("🔄 Restart bot"), KeyboardButton("❗ Связаться с человеком")]
-        ],
-        resize_keyboard=True,
-    )
+    # Сообщение с inline-кнопкой под текстом
     await update.message.reply_text(
-        f"Спасибо! Ваш заказ принят.\n"
-        f"ID заказа: {order_id}. Сохраните его.\n"
-        f"День доставки: {day}, с 12:30 до 15:30.\n"
-        f"Стоимость заказа {cost_lari} лари.\n"
-        f"Оплатить можно наличными курьеру или переводом.\n\n"
-        f"<b>Чтобы посмотреть детали позже:</b>\n"
-        f"<blockquote>/order {order_id}</blockquote>",
-        reply_markup=keyboard,
+        (
+            f"<b>🎉 Спасибо! Заказ принят</b>\n\n"
+            f"🧾 <b>ID заказа:</b> <code>{html.escape(order_id)}</code>\n"
+            f"📅 <b>Доставка:</b> {html.escape(day)}\n"
+            f"⏰ <b>Окно:</b> 12:30-15:30\n"
+            f"💸 <b>Сумма:</b> {cost_lari} лари\n"
+            f"💳 Оплата: наличными курьеру или переводом.\n\n"
+            f"<b>🔎 Посмотреть детали позже:</b>\n"
+            f"<code>/order {html.escape(order_id)}</code>"
+        ),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Скопировать номер заказа", callback_data=f"copy_order:{order_id}")]
+        ]),
         parse_mode=ParseMode.HTML,
+    )
+    # Отдельно пришлем клавиатуру с действиями после подтверждения
+    await update.message.reply_text(
+        "Что дальше?",
+        reply_markup=get_after_confirm_keyboard(),
     )
     return MENU
 
@@ -543,11 +789,17 @@ async def confirm_save_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
     menu_lines_html = "\n".join(
         f" - {html.escape(it.strip())}" for it in str(menu_for_day_text).split(',') if it.strip()
     )
+    try:
+        count_int = int(str(count))
+    except Exception:
+        count_int = 1
+    cost_lari = count_int * PRICE_LARI
     confirm_text = (
         f"<b>Подтвердите заказ</b>\n\n"
         f"<b>День:</b> {html.escape(day)}\n"
         f"<b>Количество:</b> {html.escape(str(count))}\n"
         f"<b>Меню:</b>\n{menu_lines_html}\n\n"
+        f"<b>Сумма к оплате:</b> {cost_lari} лари\n\n"
         f"<b>Адрес доставки:</b>\n{html.escape(addr or '')}\n"
         f"<b>Телефон:</b> {html.escape(phone_line)}\n\n"
         f"Все верно?"
@@ -590,11 +842,17 @@ async def address_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         menu_lines_html = "\n".join(
             f" - {html.escape(it.strip())}" for it in str(menu_for_day_text).split(',') if it.strip()
         )
+        try:
+            count_int = int(str(count))
+        except Exception:
+            count_int = 1
+        cost_lari = count_int * PRICE_LARI
         confirm_text = (
             f"<b>Подтвердите заказ</b>\n\n"
             f"<b>День:</b> {html.escape(day)}\n"
             f"<b>Количество:</b> {html.escape(str(count))}\n"
             f"<b>Меню:</b>\n{menu_lines_html}\n\n"
+            f"<b>Сумма к оплате:</b> {cost_lari} лари\n\n"
             f"<b>Адрес доставки:</b>\n{html.escape(addr or '')}\n"
             f"<b>Телефон:</b> {html.escape(phone_line)}\n\n"
             f"Все верно?"
@@ -613,6 +871,7 @@ async def address_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
             profile['address'] = address_text
             context.user_data['profile'] = profile
             set_user_profile(user.id, profile)
+            await update.message.reply_text("<b>Адрес сохранен.</b>", parse_mode=ParseMode.HTML)
             # Переходим на подтверждение с новым адресом
             pend = context.user_data.get('pending_order') or {}
             day = pend.get('day', context.user_data.get('selected_day', '(не выбран)'))
@@ -623,11 +882,17 @@ async def address_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
             menu_lines_html = "\n".join(
                 f" - {html.escape(it.strip())}" for it in str(menu_for_day_text).split(',') if it.strip()
             )
+            try:
+                count_int = int(str(count))
+            except Exception:
+                count_int = 1
+            cost_lari = count_int * PRICE_LARI
             confirm_text = (
                 f"<b>Подтвердите заказ</b>\n\n"
                 f"<b>День:</b> {html.escape(day)}\n"
                 f"<b>Количество:</b> {html.escape(str(count))}\n"
                 f"<b>Меню:</b>\n{menu_lines_html}\n\n"
+                f"<b>Сумма к оплате:</b> {cost_lari} лари\n\n"
                 f"<b>Адрес доставки:</b>\n{html.escape(addr or '')}\n"
                 f"<b>Телефон:</b> {html.escape(phone_line)}\n\n"
                 f"Все верно?"
@@ -672,16 +937,49 @@ async def order_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     created_at = data.get("created_at")
     created_line = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_at)) if created_at else "-"
     phone_line = data.get("phone") or "не указан"
-    text = (
-        f"ID заказа: {order_id}\n"
-        f"Создан: {created_line}\n"
-        f"День недели: {data.get('day')}\n"
-        f"Количество: {data.get('count')}\n"
-        f"Меню: {data.get('menu')}\n"
-        f"Адрес: {data.get('address')}\n"
-        f"Телефон: {phone_line}"
+
+    # Форматируем меню списком
+    menu_for_day = data.get("menu") or ""
+    menu_lines_html = "\n".join(
+        f"• {html.escape(it.strip())}" for it in str(menu_for_day).split(',') if it.strip()
     )
-    await update.message.reply_text(text)
+
+    # Парсим количество и считаем сумму
+    raw_count = data.get("count", 1)
+    try:
+        count_int = int(str(raw_count).split()[0])
+    except Exception:
+        count_int = 1
+    cost_lari = count_int * PRICE_LARI
+
+    status = data.get("status") or "-"
+
+    text_html = (
+        f"<b>Заказ</b> <code>{html.escape(order_id)}</code>\n"
+        f"<b>Создан:</b> {created_line}\n"
+        f"<b>Статус:</b> {html.escape(status)}\n"
+        f"<b>День:</b> {html.escape(str(data.get('day') or ''))}\n"
+        f"<b>Меню:</b>\n{menu_lines_html}\n"
+        f"<b>Количество:</b> {count_int}\n"
+        f"<b>Сумма:</b> {cost_lari} лари (по {PRICE_LARI} лари за обед)\n"
+        f"<b>Адрес:</b>\n<blockquote>{html.escape(str(data.get('address') or ''))}</blockquote>\n"
+        f"<b>Телефон:</b> {html.escape(phone_line)}"
+    )
+    await update.message.reply_text(text_html, parse_mode=ParseMode.HTML)
+
+#
+# Callback: скопировать номер заказа
+async def copy_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = (query.data or "")
+    await query.answer()
+    if not data.startswith("copy_order:"):
+        return
+    order_id = data.split(":", 1)[1]
+    try:
+        await context.bot.send_message(chat_id=query.message.chat_id, text=f"/order {order_id}")
+    except Exception as e:
+        logging.error(f"Не удалось отправить команду для копирования: {e}")
 
 # Обработка некорректных действий
 async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -720,21 +1018,21 @@ async def contact_human(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Универсальное логирование нажатий любых кнопок (ReplyKeyboard)
 BUTTON_TEXTS = [
     "Показать меню на неделю",
+    "Показать заказы на эту неделю",
+    "Неделя целиком",
     "Заказать обед",
     "Посмотреть меню",
     "Выбрать еще один день",
-    "Выбрать день недели",
     "Выбрать день заново",
     "Понедельник", "Вторник", "Среда", "Четверг", "Пятница",
     "1 обед", "2 обеда", "3 обеда", "4 обеда",
-    "Да",
     "Подтверждаю",
     "Изменить адрес",
     "Назад",
     "Отправить телефон",
-    "🔄 Restart bot",
+    "🔄 В начало",
     "❗ Связаться с человеком",
-    "Restart bot",
+    "В начало",
     "Связаться с человеком",
 ]
 
@@ -766,32 +1064,36 @@ if __name__ == "__main__":
 
     application.add_handler(CommandHandler("my_profile", my_profile))
     application.add_handler(CommandHandler("order", order_info))
+    application.add_handler(CommandHandler("sms", broadcast))
+    application.add_handler(CallbackQueryHandler(copy_order_callback, pattern=r"^copy_order:"))
 
     # Логирование нажатий любых кнопок (универсальный handler, не блокирует дальнейшую обработку)
     application.add_handler(MessageHandler(filters.Regex(BUTTONS_REGEX), log_button), group=1)
 
     conv_handler = ConversationHandler(
+        name="lunch_conv",
+        persistent=True,
         entry_points=[
             CommandHandler("start", start),
-            MessageHandler(filters.Regex("^🔄 Restart bot$"), start)
+            MessageHandler(filters.Regex("^🔄 В начало$"), start)
         ],
         states={
             MENU: [
                 MessageHandler(filters.Regex("^Показать меню на неделю$"), show_menu),
+                MessageHandler(filters.Regex("^Показать заказы на эту неделю$"), admin_show_week_orders),
+                MessageHandler(filters.Regex("^(Неделя целиком|Понедельник|Вторник|Среда|Четверг|Пятница)$"), admin_report_pick),
                 MessageHandler(filters.Regex("^Заказать обед$"), order_lunch),
                 MessageHandler(filters.Regex("^Посмотреть меню$"), show_menu),
                 MessageHandler(filters.Regex("^Выбрать еще один день$"), order_lunch),
-                MessageHandler(filters.Regex("^🔄 Restart bot$"), start),
-                MessageHandler(filters.Regex("^Restart bot$"), start),
+                MessageHandler(filters.Regex("^🔄 В начало$"), start),
+                MessageHandler(filters.Regex("^В начало$"), start),
                 MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
             ],
             ORDER_DAY: [
                 MessageHandler(filters.Regex("^(Понедельник|Вторник|Среда|Четверг|Пятница)$"), select_day),
-                MessageHandler(filters.Regex("^Да$"), order_lunch),
-                MessageHandler(filters.Regex("^Выбрать день недели$"), order_lunch),
-                MessageHandler(filters.Regex("^🔄 Restart bot$"), start),
-                MessageHandler(filters.Regex("^Restart bot$"), start),
+                MessageHandler(filters.Regex("^🔄 В начало$"), start),
+                MessageHandler(filters.Regex("^В начало$"), start),
                 MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
             ],
@@ -799,8 +1101,8 @@ if __name__ == "__main__":
                 MessageHandler(filters.Regex("^Назад$"), back_to_day),
                 MessageHandler(filters.Regex("^Выбрать день заново$"), order_lunch),
                 MessageHandler(filters.Regex("^(1 обед|2 обеда|3 обеда|4 обеда)$"), select_count),
-                MessageHandler(filters.Regex("^🔄 Restart bot$"), start),
-                MessageHandler(filters.Regex("^Restart bot$"), start),
+                MessageHandler(filters.Regex("^🔄 В начало$"), start),
+                MessageHandler(filters.Regex("^В начало$"), start),
                 MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
             ],
@@ -809,15 +1111,15 @@ if __name__ == "__main__":
                 MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
                 MessageHandler((filters.TEXT | filters.CONTACT) & ~filters.COMMAND, address_phone),
-                MessageHandler(filters.Regex("^🔄 Restart bot$"), start),
-                MessageHandler(filters.Regex("^Restart bot$"), start),
+                MessageHandler(filters.Regex("^🔄 В начало$"), start),
+                MessageHandler(filters.Regex("^В начало$"), start),
             ],
             CONFIRM: [
                 MessageHandler(filters.Regex("^Назад$"), back_to_count),
                 MessageHandler(filters.CONTACT, confirm_save_phone),
                 MessageHandler(filters.Regex("^(Подтверждаю|Изменить адрес)$"), confirm_order),
-                MessageHandler(filters.Regex("^🔄 Restart bot$"), start),
-                MessageHandler(filters.Regex("^Restart bot$"), start),
+                MessageHandler(filters.Regex("^🔄 В начало$"), start),
+                MessageHandler(filters.Regex("^В начало$"), start),
                 MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_order),
