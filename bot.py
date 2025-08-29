@@ -170,6 +170,17 @@ def save_order(order_id: str, payload: dict) -> None:
     _save_orders(data)
 
 
+# Update status of an existing order
+def set_order_status(order_id: str, new_status: str) -> bool:
+    """Update status of an existing order. Returns True if changed."""
+    data = _load_orders()
+    if order_id not in data:
+        return False
+    data[order_id]["status"] = new_status
+    _save_orders(data)
+    return True
+
+
 def get_order(order_id: str) -> dict | None:
     return _load_orders().get(order_id)
 
@@ -337,7 +348,6 @@ async def admin_show_week_orders(update: Update, context: ContextTypes.DEFAULT_T
     return MENU
 
 
-# Новая функция генерации отчета по выбору администратора
 async def admin_report_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id != ADMIN_ID:
@@ -345,7 +355,7 @@ async def admin_report_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return MENU
 
     selection = (update.message.text or "").strip()
-    if selection not in {"Неделя целиком","Понедельник","Вторник","Среда","Четверг","Пятница"}:
+    if selection not in {"Неделя целиком", "Понедельник", "Вторник", "Среда", "Четверг", "Пятница"}:
         await update.message.reply_text("Выберите вариант из клавиатуры.", reply_markup=get_admin_report_keyboard())
         return MENU
 
@@ -359,30 +369,52 @@ async def admin_report_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     end_ts = int(end_dt.timestamp())
 
     orders = _load_orders()
-    week_orders = []
+    week_orders_active = []
+    week_orders_cancelled = []
+
     for oid, payload in orders.items():
         ts = int(payload.get("created_at") or 0)
         dname = str(payload.get("day") or "")
-        if start_ts <= ts <= end_ts and (day_filter is None or dname == day_filter):
-            p = dict(payload)
-            p["__id"] = oid
-            week_orders.append(p)
+        if not (start_ts <= ts <= end_ts):
+            continue
+        if day_filter is not None and dname != day_filter:
+            continue
+        status = str(payload.get("status") or "").lower()
+        p = dict(payload)
+        p["__id"] = oid
+        p["__status"] = status
+        if status.startswith("cancel"):
+            week_orders_cancelled.append(p)
+        else:
+            week_orders_active.append(p)
 
     day_order = {"Понедельник":0, "Вторник":1, "Среда":2, "Четверг":3, "Пятница":4, "Суббота":5, "Воскресенье":6}
-    week_orders.sort(key=lambda x: (day_order.get(str(x.get("day")), 99), int(x.get("created_at") or 0)))
+    sort_key = lambda x: (day_order.get(str(x.get("day")), 99), int(x.get("created_at") or 0))
+    week_orders_active.sort(key=sort_key)
+    week_orders_cancelled.sort(key=sort_key)
 
     totals_by_day = {}
+    cancelled_by_day = {}
     grand = 0
-    for o in week_orders:
+
+    def _count_int(v):
         try:
-            cnt = int(str(o.get("count",1)).split()[0])
+            return int(str(v).split()[0])
         except Exception:
-            cnt = 1
+            return 1
+
+    for o in week_orders_active:
+        cnt = _count_int(o.get("count", 1))
         grand += cnt
         d = str(o.get("day") or "-")
         b = totals_by_day.setdefault(d, {"count": 0, "items": []})
         b["count"] += cnt
         b["items"].append(o)
+
+    for o in week_orders_cancelled:
+        d = str(o.get("day") or "-")
+        b = cancelled_by_day.setdefault(d, [])
+        b.append(o)
 
     menu_data = load_menu() or {}
     week_label = menu_data.get("week") or "эта неделя"
@@ -393,30 +425,46 @@ async def admin_report_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         header = f"<b>📊 Заказы за неделю:</b> {html.escape(str(week_label))}"
 
     lines = [header]
-    if not week_orders:
+    if not week_orders_active and not week_orders_cancelled:
         lines.append("Заказов пока нет.")
     else:
-        days_iter = [day_filter] if day_filter else ["Понедельник","Вторник","Среда","Четверг","Пятница","Суббота","Воскресенье"]
+        days_iter = [day_filter] if day_filter else ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
         for d_name in days_iter:
-            b = totals_by_day.get(d_name)
-            if not b:
+            active_block = totals_by_day.get(d_name)
+            cancelled_block = cancelled_by_day.get(d_name, [])
+            if not active_block and not cancelled_block:
                 continue
-            day_sum = b["count"] * PRICE_LARI
-            lines.append(f"\n<b>{html.escape(d_name)}</b> - {b['count']} шт. / {day_sum} лари")
-            for o in b["items"]:
-                oid = o.get("__id")
-                try:
-                    cnt = int(str(o.get("count",1)).split()[0])
-                except Exception:
-                    cnt = 1
-                addr_txt = str(o.get("address") or "-").strip()
-                uid = int(o.get("user_id") or 0)
-                uname = o.get("username") or ""
-                uname_tag = f"@{uname}" if uname else ""
-                cust = f"<a href=\"tg://user?id={uid}\">{uid}</a>" if uid else "-"
-                username_part = f" {html.escape(uname_tag)}" if uname_tag else ""
-                lines.append(f"• <code>/order {html.escape(oid)}</code> ×{cnt} - {html.escape(addr_txt)} - {cust}{username_part}")
-        lines.append(f"\n<b>Итого:</b> {grand} шт. / {grand*PRICE_LARI} лари")
+
+            # Активные
+            if active_block:
+                day_sum = active_block["count"] * PRICE_LARI
+                lines.append(f"\n<b>{html.escape(d_name)}</b> - {active_block['count']} шт. / {day_sum} лари")
+                for o in active_block["items"]:
+                    oid = o.get("__id")
+                    cnt = _count_int(o.get("count", 1))
+                    addr_txt = str(o.get("address") or "-").strip()
+                    uid = int(o.get("user_id") or 0)
+                    uname = o.get("username") or ""
+                    uname_tag = f"@{uname}" if uname else ""
+                    cust = f"<a href=\"tg://user?id={uid}\">{uid}</a>" if uid else "-"
+                    username_part = f" {html.escape(uname_tag)}" if uname_tag else ""
+                    lines.append(f"• <code>/order {html.escape(oid)}</code> ×{cnt} - {html.escape(addr_txt)} - {cust}{username_part}")
+
+            # Отмененные (не входят в итоги)
+            if cancelled_block:
+                lines.append(f"<i>❌ Отмененные ({html.escape(d_name)})</i>")
+                for o in cancelled_block:
+                    oid = o.get("__id")
+                    cnt = _count_int(o.get("count", 1))
+                    addr_txt = str(o.get("address") or "-").strip()
+                    uid = int(o.get("user_id") or 0)
+                    uname = o.get("username") or ""
+                    uname_tag = f"@{uname}" if uname else ""
+                    cust = f"<a href=\"tg://user?id={uid}\">{uid}</a>" if uid else "-"
+                    username_part = f" {html.escape(uname_tag)}" if uname_tag else ""
+                    lines.append(f"• <s><code>/order {html.escape(oid)}</code> ×{cnt} - {html.escape(addr_txt)} - {cust}{username_part}</s>")
+
+        lines.append(f"\n<b>Итого (без отмененных):</b> {grand} шт. / {grand*PRICE_LARI} лари")
 
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=get_admin_report_keyboard())
     return MENU
@@ -600,12 +648,21 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CONFIRM
 
     # иначе просим отправить контакт или ввести адрес текстом
+    menu_lines_html = "\n".join(
+        f"• {html.escape(it.strip())}" for it in str(menu_for_day_text).split(',') if it.strip()
+    )
     reply_text = (
-        f"<b>Заказ почти готов</b>!\n\n"
-        f"В {html.escape(day)} доставим <b>{html.escape(str(count))}</b> {html.escape(menu_for_day_text)}.\n\n"
-        f"<b>Что дальше?</b>\n"
-        f"Отправьте, пожалуйста, <b>точный адрес доставки</b> одним сообщением: улица, дом, подъезд/этаж/квартира, ориентир для курьера.\n"
-        f"После этого вы сможете проверить и подтвердить заказ."
+        f"🎯 <b>Заказ почти готов</b>\n\n"
+        f"📅 <b>{html.escape(day)}</b>\n"
+        f"🍽️ <b>Состав:</b>\n{menu_lines_html}\n"
+        f"🔢 <b>Количество:</b> {html.escape(str(count))}\n\n"
+        f"📍 Остался 1 шаг - укажите <b>адрес доставки</b> одним сообщением:\n"
+        f"• улица и дом\n"
+        f"• подъезд/этаж/квартира\n"
+        f"• ориентир для курьера\n\n"
+        f"✍️ <i>Пример:</i>\n"
+        f"<code>ул. Руставели 10, подъезд 2, этаж 5, кв. 42; домофон 5423; ориентир - аптека</code>\n\n"
+        f"После этого покажу итог и предложу подтвердить заказ ✅"
     )
     await update.message.reply_text(reply_text, parse_mode=ParseMode.HTML, reply_markup=get_address_keyboard())
     return ADDRESS
@@ -730,7 +787,8 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<code>/order {html.escape(order_id)}</code>"
         ),
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Скопировать номер заказа", callback_data=f"copy_order:{order_id}")]
+            [InlineKeyboardButton("Скопировать номер заказа", callback_data=f"copy_order:{order_id}")],
+            [InlineKeyboardButton("Отменить этот заказ", callback_data=f"cancel_order:{order_id}")]
         ]),
         parse_mode=ParseMode.HTML,
     )
@@ -968,6 +1026,96 @@ async def order_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text_html, parse_mode=ParseMode.HTML)
 
 #
+# Cancel order via command
+async def cancel_order_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User or admin cancels an order: /cancel <ID>"""
+    args = context.args if hasattr(context, "args") else []
+    if not args:
+        await update.message.reply_text("Использование: /cancel <ID>\nНапример: /cancel BLB-ABCDEFG-1234-1XYZ")
+        return
+    order_id = args[0].strip()
+    data = get_order(order_id)
+    if not data:
+        await update.message.reply_text("Заказ с таким ID не найден.")
+        return
+
+    user = update.effective_user
+    is_admin = (user.id == ADMIN_ID)
+    is_owner = (data.get("user_id") == user.id)
+    if not (is_admin or is_owner):
+        await update.message.reply_text("У вас нет прав отменять этот заказ.")
+        return
+
+    status = str(data.get("status") or "-").lower()
+    if status != "new":
+        await update.message.reply_text("Отмена недоступна. Заказ уже в обработке или завершен.")
+        return
+
+    if set_order_status(order_id, "cancelled_by_user" if is_owner and not is_admin else "cancelled"):
+        # Уведомим админа
+        try:
+            who = admin_link_html(user)
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=(
+                    f"<b>🚫 Отмена заказа</b> <code>{html.escape(order_id)}</code>\n"
+                    f"Кем: {who} (user_id={user.id})"
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+        await update.message.reply_text(
+            f"Заказ <code>{html.escape(order_id)}</code> отменен.",
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        await update.message.reply_text("Не удалось обновить статус заказа. Попробуйте позже.")
+
+
+# Cancel order via inline button
+async def cancel_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Inline-кнопка отмены текущего заказа"""
+    query = update.callback_query
+    await query.answer()
+    data_cb = (query.data or "")
+    if not data_cb.startswith("cancel_order:"):
+        return
+    order_id = data_cb.split(":", 1)[1]
+    # Получим заказ
+    data = get_order(order_id)
+    if not data:
+        await query.edit_message_text("Заказ не найден.")
+        return
+    user_id = query.from_user.id
+    is_admin = (user_id == ADMIN_ID)
+    is_owner = (data.get("user_id") == user_id)
+    if not (is_admin or is_owner):
+        await query.edit_message_text("Нет прав для отмены этого заказа.")
+        return
+    status = str(data.get("status") or "-").lower()
+    if status != "new":
+        await query.edit_message_text("Отмена недоступна. Заказ уже в обработке или завершен.")
+        return
+    if set_order_status(order_id, "cancelled_by_user" if is_owner and not is_admin else "cancelled"):
+        try:
+            who = admin_link_html(query.from_user)
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=(
+                    f"<b>🚫 Отмена заказа</b> <code>{html.escape(order_id)}</code>\n"
+                    f"Кем: {who} (user_id={query.from_user.id})"
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+        await query.edit_message_text(
+            f"Заказ <code>{html.escape(order_id)}</code> отменен.",
+            parse_mode=ParseMode.HTML,
+        )
+
+#
 # Callback: скопировать номер заказа
 async def copy_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1066,6 +1214,8 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("order", order_info))
     application.add_handler(CommandHandler("sms", broadcast))
     application.add_handler(CallbackQueryHandler(copy_order_callback, pattern=r"^copy_order:"))
+    application.add_handler(CommandHandler("cancel", cancel_order_command))
+    application.add_handler(CallbackQueryHandler(cancel_order_callback, pattern=r"^cancel_order:"))
 
     # Логирование нажатий любых кнопок (универсальный handler, не блокирует дальнейшую обработку)
     application.add_handler(MessageHandler(filters.Regex(BUTTONS_REGEX), log_button), group=1)
