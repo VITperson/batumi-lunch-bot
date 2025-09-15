@@ -30,6 +30,7 @@ from keyboards import (
     get_after_confirm_keyboard,
     get_admin_main_keyboard,
     get_admin_report_keyboard,
+    get_duplicate_resolution_keyboard,
 )
 
 from datetime import datetime, timedelta
@@ -45,7 +46,7 @@ ORDERS_FILE = "orders.json"
 PRICE_LARI = 15
 
 # Состояния для ConversationHandler
-MENU, ORDER_DAY, ORDER_COUNT, ADDRESS, CONFIRM = range(5)
+MENU, ORDER_DAY, ORDER_COUNT, ADDRESS, CONFIRM, DUPLICATE = range(6)
 
 # Настройка логирования с TimedRotatingFileHandler
 logger = logging.getLogger()
@@ -184,6 +185,37 @@ def set_order_status(order_id: str, new_status: str) -> bool:
 
 def get_order(order_id: str) -> dict | None:
     return _load_orders().get(order_id)
+
+def find_user_order_same_day(uid: int, day_name: str) -> tuple[str, dict] | None:
+    """Ищет активный (не отмененный) заказ пользователя на указанный день в текущую неделю.
+    Возвращает пару (order_id, payload) с самым поздним созданием, либо None.
+    """
+    orders = _load_orders()
+    now = datetime.now()
+    monday = now - timedelta(days=now.weekday())
+    start_dt = datetime(monday.year, monday.month, monday.day, 0, 0, 0)
+    end_dt = start_dt + timedelta(days=6, hours=23, minutes=59, seconds=59)
+    start_ts = int(start_dt.timestamp())
+    end_ts = int(end_dt.timestamp())
+    best: tuple[str, dict] | None = None
+    for oid, payload in orders.items():
+        try:
+            if int(payload.get("user_id") or 0) != int(uid):
+                continue
+        except Exception:
+            continue
+        dname = str(payload.get("day") or "")
+        if dname != day_name:
+            continue
+        status = str(payload.get("status") or "").lower()
+        if status.startswith("cancel"):
+            continue
+        ts = int(payload.get("created_at") or 0)
+        if not (start_ts <= ts <= end_ts):
+            continue
+        if best is None or ts > int(best[1].get("created_at") or 0):
+            best = (oid, payload)
+    return best
 
 
 def get_user_profile(uid: int) -> dict:
@@ -505,6 +537,111 @@ async def switch_to_admin_mode(update: Update, context: ContextTypes.DEFAULT_TYP
     )
     return MENU
 
+# --- Мои текущие заказы (для пользователя) ---
+def _ru_obed_plural(n: int) -> str:
+    n = abs(n) % 100
+    n1 = n % 10
+    if 11 <= n <= 19:
+        return "обедов"
+    if n1 == 1:
+        return "обед"
+    if 2 <= n1 <= 4:
+        return "обеда"
+    return "обедов"
+
+async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает текущие (сегодня и позже) заказы пользователя за текущую неделю."""
+    user = update.effective_user
+    uid = user.id
+
+    now = datetime.now()
+    monday = now - timedelta(days=now.weekday())
+    start_dt = datetime(monday.year, monday.month, monday.day, 0, 0, 0)
+    end_dt = start_dt + timedelta(days=6, hours=23, minutes=59, seconds=59)
+    start_ts = int(start_dt.timestamp())
+    end_ts = int(end_dt.timestamp())
+    today_idx = now.weekday()  # 0..6
+
+    day_order = {"Понедельник":0, "Вторник":1, "Среда":2, "Четверг":3, "Пятница":4, "Суббота":5, "Воскресенье":6}
+
+    orders = _load_orders()
+    mine = []
+    for oid, payload in orders.items():
+        try:
+            if int(payload.get("user_id") or 0) != uid:
+                continue
+        except Exception:
+            continue
+        ts = int(payload.get("created_at") or 0)
+        if not (start_ts <= ts <= end_ts):
+            continue
+        status = str(payload.get("status") or "").lower()
+        if status.startswith("cancel"):
+            continue
+        dname = str(payload.get("day") or "")
+        didx = day_order.get(dname, 99)
+        if didx < today_idx:
+            continue
+        item = dict(payload)
+        item["__id"] = oid
+        item["__didx"] = didx
+        item["__ts"] = ts
+        mine.append(item)
+
+    if not mine:
+        await update.message.reply_text("У вас нет актуальных заказов на эту неделю.")
+        return MENU
+
+    mine.sort(key=lambda x: (x.get("__didx", 99), x.get("__ts", 0)))
+
+    header_parts = ["🧾 <b>Ваши текущие заказы</b>"]
+    # Отобразим неделю, если есть в меню
+    try:
+        md = load_menu() or {}
+        if md.get("week"):
+            header_parts.append(f"<i>Неделя:</i> {html.escape(str(md.get('week')))}")
+    except Exception:
+        pass
+
+    lines = ["\n".join(header_parts)]
+    today_idx = datetime.now().weekday()
+
+    for i, o in enumerate(mine, start=1):
+        dname = str(o.get("day") or "")
+        didx = o.get("__didx", 99)
+        is_today = (didx == today_idx)
+        raw_count = o.get("count", 1)
+        try:
+            count_int = int(str(raw_count).split()[0])
+        except Exception:
+            count_int = 1
+
+        # Заголовок заказа: «1. Понедельник (сегодня): 2 обеда»
+        title = f"{i}. <b>{html.escape(dname)}</b>"
+        if is_today:
+            title += " <i>(сегодня)</i>"
+        title += f": <b>{count_int} {_ru_obed_plural(count_int)}</b>"
+        lines.append(title)
+
+        # Пункты меню
+        menu_val = o.get("menu")
+        if isinstance(menu_val, list):
+            items = [str(x).strip() for x in menu_val if str(x).strip()]
+        else:
+            items = [s.strip() for s in str(menu_val or '').split(',') if s.strip()]
+        if items:
+            for it in items:
+                lines.append(f"• {html.escape(it)}")
+
+        # Команда для копирования
+        order_id = o.get('__id') or ''
+        lines.append(f"<code>/order {html.escape(order_id)}</code>")
+        # Пустая строка-разделитель между заказами
+        lines.append("")
+
+    await update.message.reply_text("\n".join(lines).rstrip(), parse_mode=ParseMode.HTML)
+    return MENU
+
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Админская рассылка: /sms <текст>. Поддерживается HTML-разметка."""
     user = update.effective_user
@@ -641,6 +778,28 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data['selected_count'] = count
     context.user_data['menu_for_day'] = menu_for_day_text
+
+    # Проверка: есть ли уже заказ на этот день у пользователя
+    same = find_user_order_same_day(update.effective_user.id, day)
+    if same:
+        oid, payload = same
+        # Сохраним цель для дальнейшего решения
+        try:
+            prev_cnt = int(str(payload.get('count', 1)).split()[0])
+        except Exception:
+            prev_cnt = 1
+        context.user_data['duplicate_target'] = {
+            'order_id': oid,
+            'prev_count': prev_cnt,
+            'day': day,
+        }
+        msg = (
+            f"На <b>{html.escape(day)}</b> у вас уже есть заказ: "
+            f"<code>/order {html.escape(oid)}</code>\n\n"
+            "Что сделать с предыдущим заказом?"
+        )
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=get_duplicate_resolution_keyboard())
+        return DUPLICATE
 
     # проверяем профиль пользователя
     profile = context.user_data.get('profile')
@@ -825,7 +984,6 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<code>/order {html.escape(order_id)}</code>"
         ),
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Скопировать номер заказа", callback_data=f"copy_order:{order_id}")],
             [InlineKeyboardButton("Отменить этот заказ", callback_data=f"cancel_order:{order_id}")]
         ]),
         parse_mode=ParseMode.HTML,
@@ -906,6 +1064,138 @@ async def confirm_save_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_markup=get_confirm_keyboard(),
     )
     return CONFIRM
+
+# --- Разрешение ситуации с дублирующимся заказом на тот же день ---
+async def resolve_duplicate_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    choice = (update.message.text or "").strip()
+    dup = context.user_data.get('duplicate_target') or {}
+    oid = dup.get('order_id')
+    day = dup.get('day') or context.user_data.get('selected_day')
+    # Текущий выбор пользователя
+    count = context.user_data.get('selected_count')
+    menu_for_day_text = context.user_data.get('menu_for_day', '')
+    # Обновим профиль
+    profile = context.user_data.get('profile')
+    if not profile:
+        profile = get_user_profile(update.effective_user.id)
+        if profile:
+            context.user_data['profile'] = profile
+    has_address = bool((profile or {}).get('address'))
+
+    if choice == "Удалить предыдущий заказ" and oid:
+        # Отменяем предыдущий заказ
+        if set_order_status(oid, "cancelled_by_user"):
+            try:
+                who = admin_link_html(update.effective_user)
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=(
+                        f"<b>🚫 Отмена заказа</b> <code>{html.escape(oid)}</code>\n"
+                        f"Кем: {who} (user_id={update.effective_user.id})"
+                    ),
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
+        # Продолжаем оформление нового заказа с ранее выбранным количеством
+        try:
+            count_int = int(str(count))
+        except Exception:
+            count_int = 1
+        cost_lari = count_int * PRICE_LARI
+        if has_address:
+            context.user_data['pending_order'] = {
+                'day': day,
+                'count': count,
+                'menu': menu_for_day_text,
+            }
+            addr = profile.get('address')
+            phone_line = profile.get('phone') or "вы можете добавить телефон через кнопку ниже"
+            menu_lines_html = "\n".join(
+                f" - {html.escape(it.strip())}" for it in str(menu_for_day_text).split(',') if it.strip()
+            )
+            confirm_text = (
+                f"<b>Подтвердите заказ</b>\n\n"
+                f"<b>День:</b> {html.escape(day)}\n"
+                f"<b>Количество:</b> {html.escape(str(count))}\n"
+                f"<b>Меню:</b>\n{menu_lines_html}\n\n"
+                f"<b>Сумма к оплате:</b> {cost_lari} лари\n\n"
+                f"<b>Адрес доставки:</b>\n{html.escape(addr or '')}\n"
+                f"<b>Телефон:</b> {html.escape(phone_line)}\n\n"
+                f"Все верно?"
+            )
+            await update.message.reply_text(
+                confirm_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_confirm_keyboard(),
+            )
+            context.user_data.pop('duplicate_target', None)
+            return CONFIRM
+        else:
+            # запрашиваем адрес
+            menu_lines_html = "\n".join(
+                f"• {html.escape(it.strip())}" for it in str(menu_for_day_text).split(',') if it.strip()
+            )
+            reply_text = (
+                f"🎯 <b>Заказ почти готов</b>\n\n"
+                f"📅 <b>{html.escape(day)}</b>\n"
+                f"🍽️ <b>Состав:</b>\n{menu_lines_html}\n"
+                f"🔢 <b>Количество:</b> {html.escape(str(count))}\n\n"
+                f"📍 Остался 1 шаг - укажите <b>адрес доставки</b> одним сообщением:\n"
+                f"• улица и дом\n"
+                f"• подъезд/этаж/квартира\n"
+                f"• ориентир для курьера\n\n"
+                f"После этого покажу итог и предложу подтвердить заказ ✅"
+            )
+            await update.message.reply_text(reply_text, parse_mode=ParseMode.HTML, reply_markup=get_address_keyboard())
+            context.user_data.pop('duplicate_target', None)
+            return ADDRESS
+
+    if choice == "Добавить к существующему" and oid:
+        # Увеличиваем количество в существующем заказе
+        try:
+            add_cnt = int(str(count))
+        except Exception:
+            add_cnt = 1
+        prev_cnt = dup.get('prev_count') or 0
+        new_total = max(1, int(prev_cnt) + add_cnt)
+        orders = _load_orders()
+        if oid in orders:
+            orders[oid]['count'] = str(new_total)
+            _save_orders(orders)
+        # Уведомим админа об изменении
+        try:
+            who = admin_link_html(update.effective_user)
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=(
+                    f"<b>✏️ Обновление заказа</b> <code>{html.escape(oid)}</code>\n"
+                    f"Кем: {who} (user_id={update.effective_user.id})\n"
+                    f"Количество: было {prev_cnt}, стало {new_total}"
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+        # Сообщение пользователю
+        await update.message.reply_text(
+            (
+                f"<b>Готово!</b> Обновил ваш заказ на <b>{html.escape(day)}</b>.\n"
+                f"Текущее количество: <b>{new_total} {_ru_obed_plural(new_total)}</b>\n"
+                f"<code>/order {html.escape(oid)}</code>"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_after_confirm_keyboard(),
+        )
+        context.user_data.pop('duplicate_target', None)
+        return MENU
+
+    # Непредвиденный ввод — спросим снова
+    await update.message.reply_text(
+        "Выберите один из вариантов ниже:",
+        reply_markup=get_duplicate_resolution_keyboard(),
+    )
+    return DUPLICATE
 
 async def address_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # не логируем PII содержимое
@@ -1213,6 +1503,9 @@ async def contact_human(update: Update, context: ContextTypes.DEFAULT_TYPE):
 BUTTON_TEXTS = [
     "Показать меню на неделю",
     "Показать заказы на эту неделю",
+    "Мои заказы",
+    "Удалить предыдущий заказ",
+    "Добавить к существующему",
     "Перейти в режим пользователя",
     "Перейти в режим администратора",
     "Неделя целиком",
@@ -1279,6 +1572,7 @@ if __name__ == "__main__":
             MENU: [
                 MessageHandler(filters.Regex("^Показать меню на неделю$"), show_menu),
                 MessageHandler(filters.Regex("^Показать заказы на эту неделю$"), admin_show_week_orders),
+                MessageHandler(filters.Regex("^Мои заказы$"), my_orders),
                 MessageHandler(filters.Regex("^Перейти в режим пользователя$"), switch_to_user_mode),
                 MessageHandler(filters.Regex("^Перейти в режим администратора$"), switch_to_admin_mode),
                 MessageHandler(filters.Regex("^(Неделя целиком|Понедельник|Вторник|Среда|Четверг|Пятница)$"), admin_report_pick),
@@ -1323,6 +1617,14 @@ if __name__ == "__main__":
                 MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_order),
+            ],
+            DUPLICATE: [
+                MessageHandler(filters.Regex("^Удалить предыдущий заказ$"), resolve_duplicate_order),
+                MessageHandler(filters.Regex("^Добавить к существующему$"), resolve_duplicate_order),
+                MessageHandler(filters.Regex("^🔄 В начало$"), start),
+                MessageHandler(filters.Regex("^В начало$"), start),
+                MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
+                MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
             ],
         },
         fallbacks=[CommandHandler("start", start), MessageHandler(filters.ALL, fallback)]
