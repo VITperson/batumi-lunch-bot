@@ -20,6 +20,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 from keyboards import (
     add_start_button,
     get_main_menu_keyboard,
+    get_main_menu_keyboard_admin,
     get_day_keyboard,
     get_count_keyboard,
     get_count_retry_keyboard,
@@ -269,9 +270,13 @@ def admin_link_html(user) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(update.message.from_user, "start")
     # Сброс состояния и user_data
+    # Сохраним флаг режима админа, если был
+    prev_admin_ui = context.user_data.get('admin_ui', True)
     context.user_data.clear()
+    context.user_data['admin_ui'] = prev_admin_ui
     is_admin = update.effective_user.id == ADMIN_ID
-    if is_admin:
+    admin_ui = context.user_data.get('admin_ui', True)
+    if is_admin and admin_ui:
         admin_caption = (
             "<b>Режим администратора</b>\n\n"
             "📊 <b>Отчеты</b>:\n"
@@ -323,12 +328,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 photo=logo,
                 caption=caption,
                 parse_mode=ParseMode.HTML,
-                reply_markup=get_main_menu_keyboard(),
+                reply_markup=(get_main_menu_keyboard_admin() if is_admin else get_main_menu_keyboard()),
             )
     except FileNotFoundError:
         await update.message.reply_text(
             caption,
-            reply_markup=get_main_menu_keyboard(),
+            reply_markup=(get_main_menu_keyboard_admin() if is_admin else get_main_menu_keyboard()),
             parse_mode=ParseMode.HTML,
         )
     return MENU
@@ -469,6 +474,37 @@ async def admin_report_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=get_admin_report_keyboard())
     return MENU
 
+# --- Переключение интерфейса админа ---
+async def switch_to_user_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Админ переключается в пользовательский интерфейс."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Недоступно.")
+        return MENU
+    context.user_data['admin_ui'] = False
+    await update.message.reply_text(
+        "Переключено в режим пользователя.",
+        reply_markup=get_main_menu_keyboard_admin(),
+    )
+    return MENU
+
+async def switch_to_admin_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Админ переключается обратно в админский интерфейс."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Недоступно.")
+        return MENU
+    context.user_data['admin_ui'] = True
+    admin_caption = (
+        "<b>Режим администратора</b>\n\n"
+        "📊 <b>Отчеты</b>: воспользуйтесь кнопкой ниже.\n"
+        "📣 <b>Рассылка</b>: /sms <i>текст</i>"
+    )
+    await update.message.reply_text(
+        admin_caption,
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_admin_main_keyboard(),
+    )
+    return MENU
+
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Админская рассылка: /sms <текст>. Поддерживается HTML-разметка."""
     user = update.effective_user
@@ -503,7 +539,8 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id == ADMIN_ID:
+    is_admin = (update.effective_user.id == ADMIN_ID)
+    if is_admin and context.user_data.get('admin_ui', True):
         await update.message.reply_text(
             "Вы админ. Используйте кнопку: Показать заказы на эту неделю.",
             reply_markup=get_admin_main_keyboard(),
@@ -531,7 +568,8 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Обработка кнопки "Заказать обед" или "Да"
 async def order_lunch(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id == ADMIN_ID:
+    is_admin = (update.effective_user.id == ADMIN_ID)
+    if is_admin and context.user_data.get('admin_ui', True):
         await update.message.reply_text(
             "Вы админ. Используйте кнопку: Показать заказы на эту неделю.",
             reply_markup=get_admin_main_keyboard(),
@@ -1133,8 +1171,16 @@ async def copy_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = context.user_data.get('state', 'unknown')
     log_user_action(update.message.from_user, f"fallback state={state}")
+    is_admin = (update.effective_user.id == ADMIN_ID)
+    admin_ui = context.user_data.get('admin_ui', True)
+    kb = get_main_menu_keyboard()
+    if is_admin and not admin_ui:
+        from keyboards import get_main_menu_keyboard_admin
+        kb = get_main_menu_keyboard_admin()
+    elif is_admin and admin_ui:
+        kb = get_admin_main_keyboard()
     await update.message.reply_text(
-        "Пожалуйста, используйте <b>кнопки</b> для навигации.", parse_mode=ParseMode.HTML, reply_markup=get_main_menu_keyboard()
+        "Пожалуйста, используйте <b>кнопки</b> для навигации.", parse_mode=ParseMode.HTML, reply_markup=kb
     )
     return MENU
 
@@ -1167,6 +1213,8 @@ async def contact_human(update: Update, context: ContextTypes.DEFAULT_TYPE):
 BUTTON_TEXTS = [
     "Показать меню на неделю",
     "Показать заказы на эту неделю",
+    "Перейти в режим пользователя",
+    "Перейти в режим администратора",
     "Неделя целиком",
     "Заказать обед",
     "Посмотреть меню",
@@ -1231,6 +1279,8 @@ if __name__ == "__main__":
             MENU: [
                 MessageHandler(filters.Regex("^Показать меню на неделю$"), show_menu),
                 MessageHandler(filters.Regex("^Показать заказы на эту неделю$"), admin_show_week_orders),
+                MessageHandler(filters.Regex("^Перейти в режим пользователя$"), switch_to_user_mode),
+                MessageHandler(filters.Regex("^Перейти в режим администратора$"), switch_to_admin_mode),
                 MessageHandler(filters.Regex("^(Неделя целиком|Понедельник|Вторник|Среда|Четверг|Пятница)$"), admin_report_pick),
                 MessageHandler(filters.Regex("^Заказать обед$"), order_lunch),
                 MessageHandler(filters.Regex("^Посмотреть меню$"), show_menu),

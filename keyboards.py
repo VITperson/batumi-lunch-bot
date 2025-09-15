@@ -15,6 +15,17 @@ def get_main_menu_keyboard():
         resize_keyboard=True,
     )
 
+def get_main_menu_keyboard_admin():
+    """Пользовательское меню для админа с кнопкой возврата в админский режим."""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("Показать меню на неделю"), KeyboardButton("Заказать обед")],
+            [KeyboardButton("Перейти в режим администратора")],
+            [KeyboardButton("🔄 В начало"), KeyboardButton("❗ Связаться с человеком")],
+        ],
+        resize_keyboard=True,
+    )
+
 def get_day_keyboard():
     rows = [
         [KeyboardButton("Понедельник"), KeyboardButton("Вторник")],
@@ -92,6 +103,7 @@ def get_after_confirm_keyboard():
 def get_admin_main_keyboard():
     rows = [
         [KeyboardButton("Показать заказы на эту неделю")],
+        [KeyboardButton("Перейти в режим пользователя")],
         [KeyboardButton("🔄 В начало"), KeyboardButton("❗ Связаться с человеком")],
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
