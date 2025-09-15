@@ -35,6 +35,8 @@ from keyboards import (
 
 from datetime import datetime, timedelta
 from telegram.constants import ParseMode
+from telegram.request import HTTPXRequest
+from telegram.error import NetworkError, TimedOut, RetryAfter, Forbidden, BadRequest
 from logging.handlers import TimedRotatingFileHandler
 import time
 import os
@@ -51,8 +53,14 @@ MENU, ORDER_DAY, ORDER_COUNT, ADDRESS, CONFIRM, DUPLICATE = range(6)
 # Настройка логирования с TimedRotatingFileHandler
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+# Храним логи в папке logs/
+LOG_DIR = 'logs'
+try:
+    os.makedirs(LOG_DIR, exist_ok=True)
+except Exception:
+    pass
 log_handler = TimedRotatingFileHandler(
-    'bot.log',
+    os.path.join(LOG_DIR, 'bot.log'),
     when="midnight",
     interval=1,
     backupCount=30,
@@ -1540,7 +1548,31 @@ async def log_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #
 # Глобальный обработчик ошибок
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logging.exception("Unhandled exception", exc_info=context.error)
+    err = context.error
+    # Тихая обработка сетевых проблем и ограничений
+    try:
+        if isinstance(err, (NetworkError, TimedOut)):
+            logging.warning(f"Network issue: {err}")
+            return
+        if isinstance(err, RetryAfter):
+            ra = getattr(err, 'retry_after', 1)
+            logging.warning(f"Rate limited, retry after {ra}s")
+            try:
+                await asyncio.sleep(float(ra) if ra else 1)
+            except Exception:
+                pass
+            return
+        if isinstance(err, Forbidden):
+            logging.info(f"Forbidden: {err}")
+            return
+        if isinstance(err, BadRequest):
+            logging.warning(f"BadRequest: {err}")
+            return
+    except Exception:
+        # В случае ошибки в самом обработчике — продолжим стандартным путем
+        pass
+
+    logging.exception("Unhandled exception", exc_info=err)
     try:
         from telegram import Update
         if isinstance(update, Update) and update.effective_message:
@@ -1553,7 +1585,21 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 if __name__ == "__main__":
     persistence = PicklePersistence(filepath="bot_state.pickle")
-    application = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
+    # Настройка таймаутов HTTPX для стабильного long polling
+    request = HTTPXRequest(
+        connect_timeout=10,
+        read_timeout=80,
+        write_timeout=10,
+        pool_timeout=5,
+    )
+    application = (
+        Application
+        .builder()
+        .token(BOT_TOKEN)
+        .persistence(persistence)
+        .request(request)
+        .build()
+    )
 
     application.add_error_handler(error_handler)
 
