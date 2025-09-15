@@ -1,24 +1,23 @@
-# Release Notes — 2025-09-15
+# Что нового — 15 сентября 2025
 
-- Admin/user UI toggle for admin
-  - Admins can switch between admin and user interfaces via buttons.
-  - Mode persists across /start.
+- Переключение режима администратора/пользователя
+  - Админ может переключаться между админским и пользовательским интерфейсами кнопками.
+  - Выбранный режим сохраняется и учитывается после /start.
 
-- “Мои заказы” (My Orders)
-  - New button in the main menu and post‑order screen.
-  - Shows only current‑week orders for today and later.
-  - Clean layout with header, bullets, and copyable `/order <ID>` line.
+- «Мои заказы»
+  - Новая кнопка в главном меню и после оформления заказа.
+  - Показывает только актуальные заказы текущей недели: на сегодня и позже.
+  - Аккуратное оформление: заголовок, маркеры и копируемая строка `/order <ID>`.
 
-- Order completion message
-  - Removed the “Скопировать номер заказа” inline button.
-  - Keeps a copyable `/order <ID>` line in the message body.
+- Сообщение о подтверждении заказа
+  - Удалена инлайн‑кнопка «Скопировать номер заказа».
+  - Оставлена копируемая строка `/order <ID>` внутри сообщения.
 
-- Duplicate order resolution
-  - If a user orders the same day again, the bot asks:
-    - “Удалить предыдущий заказ” (cancel prior and proceed new), or
-    - “Добавить к существующему” (increase quantity of the existing order).
-  - Admin is notified on quantity updates and cancellations.
+- Разрешение дублирующего заказа за тот же день
+  - Если пользователь оформляет заказ на день, на который заказ уже есть, бот предложит:
+    - «Удалить предыдущий заказ» — отменить старый и продолжить новый, или
+    - «Добавить к существующему» — увеличить количество в существующем заказе.
+  - Администратор получает уведомления об отменах и изменении количества.
 
-- Misc
-  - Improved formatting for order listings.
-
+- Прочее
+  - Улучшено форматирование списка заказов в «Мои заказы».
