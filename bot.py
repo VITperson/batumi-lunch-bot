@@ -1351,7 +1351,13 @@ async def order_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Адрес:</b>\n<blockquote>{html.escape(str(data.get('address') or ''))}</blockquote>\n"
         f"<b>Телефон:</b> {html.escape(phone_line)}"
     )
-    await update.message.reply_text(text_html, parse_mode=ParseMode.HTML)
+    # Кнопка отмены для активного заказа (new) и при наличии прав (владелец или админ)
+    reply_kb = None
+    if (is_admin or is_owner) and str(status).lower() == "new":
+        reply_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Отменить этот заказ", callback_data=f"cancel_order:{order_id}")]
+        ])
+    await update.message.reply_text(text_html, parse_mode=ParseMode.HTML, reply_markup=reply_kb)
 
 #
 # Cancel order via command
