@@ -31,9 +31,14 @@ from keyboards import (
     get_admin_main_keyboard,
     get_admin_report_keyboard,
     get_duplicate_resolution_keyboard,
+    get_admin_manage_menu_keyboard,
+    get_admin_day_select_keyboard,
+    get_admin_day_actions_keyboard,
+    get_admin_confirm_keyboard,
+    get_admin_back_keyboard,
 )
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from telegram.constants import ParseMode
 from telegram.request import HTTPXRequest
 from telegram.error import NetworkError, TimedOut, RetryAfter, Forbidden, BadRequest
@@ -45,10 +50,34 @@ import asyncio
 
 USERS_FILE = "users.json"
 ORDERS_FILE = "orders.json"
+ORDER_WINDOW_FILE = "order_window.json"
 PRICE_LARI = 15
 
+DAY_TO_INDEX = {
+    "Понедельник": 0,
+    "Вторник": 1,
+    "Среда": 2,
+    "Четверг": 3,
+    "Пятница": 4,
+}
+ORDER_CUTOFF_HOUR = 10  # Заказы на день принимаются до 10:00 этого дня
+
 # Состояния для ConversationHandler
-MENU, ORDER_DAY, ORDER_COUNT, ADDRESS, CONFIRM, DUPLICATE = range(6)
+(
+    MENU,
+    ORDER_DAY,
+    ORDER_COUNT,
+    ADDRESS,
+    CONFIRM,
+    DUPLICATE,
+    ADMIN_MENU,
+    ADMIN_MENU_DAY_SELECT,
+    ADMIN_MENU_ACTION,
+    ADMIN_MENU_ITEM_SELECT,
+    ADMIN_MENU_ITEM_TEXT,
+    ADMIN_MENU_WEEK,
+    ADMIN_MENU_PHOTO,
+) = range(13)
 
 # Настройка логирования с TimedRotatingFileHandler
 logger = logging.getLogger()
@@ -100,6 +129,121 @@ def load_menu():
     except Exception as e:
         logging.error(f"Ошибка загрузки меню: {e}")
         return None
+
+
+def save_menu(menu_data: dict) -> bool:
+    try:
+        tmp = "menu.json.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(menu_data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, "menu.json")
+        return True
+    except Exception as e:
+        logging.error(f"Не удалось сохранить menu.json: {e}")
+        return False
+
+
+def _get_current_menu() -> dict:
+    data = load_menu()
+    if not isinstance(data, dict):
+        data = {"week": "", "menu": {}}
+    data.setdefault("week", "")
+    if not isinstance(data.get("menu"), dict):
+        data["menu"] = {}
+    return data
+
+
+def _format_admin_menu(menu_data: dict) -> str:
+    week = html.escape(str(menu_data.get("week") or "не указано"))
+    lines = [f"<b>Неделя:</b> {week}"]
+    window = _load_order_window()
+    week_start_str = window.get("week_start")
+    if window.get("next_week_enabled") and week_start_str:
+        try:
+            ws = date.fromisoformat(week_start_str)
+            status = ws.strftime("приём открыт до старта недели %d.%m.%Y")
+        except Exception:
+            status = "приём открыт (дата старта неизвестна)"
+    elif window.get("next_week_enabled"):
+        status = "приём открыт (дата старта неизвестна)"
+    else:
+        status = "приём закрыт"
+    lines.append(f"<i>Приём заказов на следующую неделю: {html.escape(status)}</i>")
+    menu_block = menu_data.get("menu") or {}
+    if not menu_block:
+        lines.append("<i>Меню пока пустое.</i>")
+        return "\n".join(lines)
+    for day, items in menu_block.items():
+        lines.append("")
+        lines.append(f"<b>{html.escape(str(day))}</b>")
+        if isinstance(items, list) and items:
+            for idx, item in enumerate(items, start=1):
+                lines.append(f"{idx}. {html.escape(str(item))}")
+        else:
+            lines.append("• (нет блюд)")
+    return "\n".join(lines)
+
+
+def _parse_menu_items(text: str) -> list[str]:
+    items: list[str] = []
+    for line in text.splitlines():
+        cleaned = line.strip()
+        if cleaned:
+            items.append(cleaned)
+    if items:
+        return items
+    for part in text.split(","):
+        cleaned = part.strip()
+        if cleaned:
+            items.append(cleaned)
+    return items
+
+
+def _is_day_available_for_order(day: str) -> tuple[bool, str | None, bool, date | None]:
+    idx = DAY_TO_INDEX.get(day)
+    if idx is None:
+        return False, "Неверный день недели.", False, None
+    now = datetime.now()
+    today_idx = now.weekday()
+
+    window = _load_order_window()
+    week_start_str = window.get("week_start")
+    next_week_enabled = bool(window.get("next_week_enabled"))
+    week_start_date: date | None = None
+    if week_start_str:
+        try:
+            week_start_date = date.fromisoformat(week_start_str)
+        except Exception:
+            week_start_date = None
+            next_week_enabled = False
+    today_date = now.date()
+    next_week_active = False
+    if next_week_enabled:
+        if week_start_date and today_date < week_start_date:
+            next_week_active = True
+        else:
+            _set_next_week_orders(False, None)
+            next_week_enabled = False
+            week_start_date = None
+
+    current_week_start = _current_week_start(now)
+
+    if idx < today_idx:
+        if next_week_active and week_start_date is not None:
+            return True, None, True, week_start_date
+        return False, (
+            f"Заказы на <b>{html.escape(day)}</b> уже закрыты для текущей недели. "
+            "День снова станет доступен после обновления меню на следующую неделю (утро субботы)."
+        ), False, current_week_start
+    if idx == today_idx and now.hour >= ORDER_CUTOFF_HOUR:
+        cutoff_str = f"{ORDER_CUTOFF_HOUR:02d}:00"
+        return False, (
+            f"Заказы на <b>{html.escape(day)}</b> принимаются до {cutoff_str} этого дня. "
+            "Пожалуйста, выберите другой день недели."
+        ), False, current_week_start
+
+    target_week = week_start_date if next_week_active and week_start_date is not None else current_week_start
+    return True, None, bool(next_week_active and week_start_date is not None), target_week
 
 def log_user_action(user, action):
     username = f"@{user.username}" if user.username else "(нет username)"
@@ -153,6 +297,57 @@ def _save_orders(data: dict) -> None:
         logging.error(f"Не удалось сохранить {ORDERS_FILE}: {e}")
 
 
+def _load_order_window() -> dict:
+    default = {"next_week_enabled": False, "week_start": None}
+    try:
+        if not os.path.exists(ORDER_WINDOW_FILE):
+            return default
+        with open(ORDER_WINDOW_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if not isinstance(data, dict):
+                return default
+            result = default | data
+            if not isinstance(result.get("next_week_enabled"), bool):
+                result["next_week_enabled"] = False
+            if result.get("week_start") and not isinstance(result.get("week_start"), str):
+                result["week_start"] = None
+            return result
+    except Exception as e:
+        logging.error(f"Не удалось загрузить {ORDER_WINDOW_FILE}: {e}")
+        return default
+
+
+def _save_order_window(data: dict) -> None:
+    try:
+        tmp = ORDER_WINDOW_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, ORDER_WINDOW_FILE)
+    except Exception as e:
+        logging.error(f"Не удалось сохранить {ORDER_WINDOW_FILE}: {e}")
+
+
+def _next_week_start(now: datetime | None = None) -> date:
+    now = now or datetime.now()
+    days_ahead = (7 - now.weekday()) % 7
+    if days_ahead == 0:
+        days_ahead = 7
+    return (now + timedelta(days=days_ahead)).date()
+
+
+def _set_next_week_orders(enabled: bool, week_start: date | None = None) -> None:
+    payload = {
+        "next_week_enabled": bool(enabled),
+        "week_start": week_start.isoformat() if (enabled and week_start) else None,
+    }
+    _save_order_window(payload)
+
+
+def _current_week_start(now: datetime | None = None) -> date:
+    now = now or datetime.now()
+    return (now - timedelta(days=now.weekday())).date()
+
+
 def _base36(n: int) -> str:
     chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     if n == 0:
@@ -194,15 +389,16 @@ def set_order_status(order_id: str, new_status: str) -> bool:
 def get_order(order_id: str) -> dict | None:
     return _load_orders().get(order_id)
 
-def find_user_order_same_day(uid: int, day_name: str) -> tuple[str, dict] | None:
+def find_user_order_same_day(uid: int, day_name: str, week_start: date | None = None) -> tuple[str, dict] | None:
     """Ищет активный (не отмененный) заказ пользователя на указанный день в текущую неделю.
     Возвращает пару (order_id, payload) с самым поздним созданием, либо None.
     """
     orders = _load_orders()
     now = datetime.now()
-    monday = now - timedelta(days=now.weekday())
-    start_dt = datetime(monday.year, monday.month, monday.day, 0, 0, 0)
-    end_dt = start_dt + timedelta(days=6, hours=23, minutes=59, seconds=59)
+    if week_start is None:
+        week_start = _current_week_start(now)
+    start_dt = datetime.combine(week_start, datetime.min.time())
+    end_dt = start_dt + timedelta(days=7) - timedelta(seconds=1)
     start_ts = int(start_dt.timestamp())
     end_ts = int(end_dt.timestamp())
     best: tuple[str, dict] | None = None
@@ -219,8 +415,17 @@ def find_user_order_same_day(uid: int, day_name: str) -> tuple[str, dict] | None
         if status.startswith("cancel"):
             continue
         ts = int(payload.get("created_at") or 0)
-        if not (start_ts <= ts <= end_ts):
-            continue
+        delivery_week = payload.get('delivery_week_start')
+        if delivery_week:
+            try:
+                delivery_week_date = date.fromisoformat(str(delivery_week))
+            except Exception:
+                delivery_week_date = None
+            if delivery_week_date and delivery_week_date != week_start:
+                continue
+        else:
+            if not (start_ts <= ts <= end_ts):
+                continue
         if best is None or ts > int(best[1].get("created_at") or 0):
             best = (oid, payload)
     return best
@@ -306,6 +511,411 @@ def admin_link_html(user) -> str:
     name = user.first_name or (user.username and f"@{user.username}") or "Пользователь"
     return f'<a href="tg://user?id={user.id}">{html.escape(name)}</a>'
 
+
+# --- Admin menu management helper flows ---
+
+
+async def admin_manage_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("Недоступно.")
+        return MENU
+
+    context.user_data.pop('admin_menu_day', None)
+    context.user_data.pop('admin_menu_action', None)
+
+    menu_data = _get_current_menu()
+    overview = _format_admin_menu(menu_data)
+    text = (
+        "<b>Управление меню</b>\n\n"
+        "Отсюда можно обновить название недели, блюда по дням и фотографию меню.\n\n"
+        f"{overview}"
+    )
+    await update.message.reply_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_admin_manage_menu_keyboard(),
+    )
+    return ADMIN_MENU
+
+
+async def admin_menu_show_day_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("Недоступно.")
+        return MENU
+    menu_data = _get_current_menu()
+    days = list(menu_data.get('menu', {}).keys())
+    if not days:
+        await update.message.reply_text(
+            "Меню пока не заполнено. Отредактируйте файл menu.json и попробуйте снова.",
+            reply_markup=get_admin_manage_menu_keyboard(),
+        )
+        return ADMIN_MENU
+    await update.message.reply_text(
+        "Выберите день, который хотите отредактировать.",
+        reply_markup=get_admin_day_select_keyboard(days),
+    )
+    return ADMIN_MENU_DAY_SELECT
+
+
+async def admin_menu_day_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("Недоступно.")
+        return MENU
+    day = (update.message.text or "").strip()
+    menu_data = _get_current_menu()
+    menu_block = menu_data.get('menu', {})
+    if day not in menu_block:
+        await update.message.reply_text(
+            "Пожалуйста, выберите день из предложенного списка.",
+            reply_markup=get_admin_day_select_keyboard(list(menu_block.keys())),
+        )
+        return ADMIN_MENU_DAY_SELECT
+    context.user_data['admin_menu_day'] = day
+
+    context.user_data.pop('admin_menu_action', None)
+    items = menu_block.get(day) or []
+    lines = [f"<b>{html.escape(day)}</b>"]
+    if items:
+        for idx, item in enumerate(items, start=1):
+            lines.append(f"{idx}. {html.escape(str(item))}")
+    else:
+        lines.append("(Блюда не указаны)")
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_admin_day_actions_keyboard(),
+    )
+    return ADMIN_MENU_ACTION
+
+
+async def admin_menu_request_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("Недоступно.")
+        return MENU
+    await update.message.reply_text(
+        "Отправьте новую фотографию меню (как фото или как изображение-файл).",
+        reply_markup=get_admin_back_keyboard(),
+    )
+    return ADMIN_MENU_PHOTO
+
+
+async def admin_menu_request_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("Недоступно.")
+        return MENU
+    current_week = str((_get_current_menu()).get('week') or "")
+    prompt = "Введите новое название недели."
+    if current_week:
+        prompt += f"\nТекущее значение: {current_week}"
+    await update.message.reply_text(
+        prompt,
+        reply_markup=get_admin_back_keyboard(),
+    )
+    return ADMIN_MENU_WEEK
+
+
+async def admin_open_next_week_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("Недоступно.")
+        return MENU
+
+    window = _load_order_window()
+    week_start_str = window.get('week_start')
+    if window.get('next_week_enabled') and week_start_str:
+        try:
+            ws = date.fromisoformat(week_start_str)
+            formatted = ws.strftime('%d.%m.%Y')
+        except Exception:
+            formatted = week_start_str
+        await update.message.reply_text(
+            f"Приём заказов уже открыт на неделю, начинающуюся {formatted}.",
+        )
+        return await admin_manage_menu(update, context)
+
+    week_start = _next_week_start()
+    _set_next_week_orders(True, week_start)
+    formatted = week_start.strftime('%d.%m.%Y')
+    await update.message.reply_text(
+        (
+            "✅ Приём заказов на следующую неделю открыт.\n"
+            f"Первая дата доставки: {formatted}."
+        ),
+    )
+    return await admin_manage_menu(update, context)
+
+
+async def admin_menu_day_action_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['admin_menu_action'] = 'add'
+    await update.message.reply_text(
+        "Введите текст нового блюда.",
+        reply_markup=get_admin_back_keyboard(),
+    )
+    return ADMIN_MENU_ITEM_TEXT
+
+
+async def admin_menu_day_action_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    day = context.user_data.get('admin_menu_day')
+    menu_data = _get_current_menu()
+    items = menu_data.get('menu', {}).get(day) or []
+    if not items:
+        await update.message.reply_text(
+            "Для этого дня пока нет блюд. Добавьте блюдо, чтобы его можно было изменить.",
+            reply_markup=get_admin_day_actions_keyboard(),
+        )
+        return ADMIN_MENU_ACTION
+    listing = [f"{idx}. {item}" for idx, item in enumerate(items, start=1)]
+    await update.message.reply_text(
+        "Укажите номер блюда, которое нужно изменить:\n" + "\n".join(listing),
+        reply_markup=get_admin_back_keyboard(),
+    )
+    context.user_data['admin_menu_action'] = 'edit'
+    return ADMIN_MENU_ITEM_SELECT
+
+
+async def admin_menu_day_action_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    day = context.user_data.get('admin_menu_day')
+    menu_data = _get_current_menu()
+    items = menu_data.get('menu', {}).get(day) or []
+    if not items:
+        await update.message.reply_text(
+            "Для этого дня пока нет блюд, удалять нечего.",
+            reply_markup=get_admin_day_actions_keyboard(),
+        )
+        return ADMIN_MENU_ACTION
+    listing = [f"{idx}. {item}" for idx, item in enumerate(items, start=1)]
+    await update.message.reply_text(
+        "Укажите номер блюда, которое нужно удалить:\n" + "\n".join(listing),
+        reply_markup=get_admin_back_keyboard(),
+    )
+    context.user_data['admin_menu_action'] = 'delete'
+    return ADMIN_MENU_ITEM_SELECT
+
+
+async def admin_menu_day_action_replace(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['admin_menu_action'] = 'replace'
+    await update.message.reply_text(
+        (
+            "Отправьте новый список блюд для выбранного дня.\n"
+            "Каждое блюдо — с новой строки (или через запятую)."
+        ),
+        reply_markup=get_admin_back_keyboard(),
+    )
+    return ADMIN_MENU_ITEM_TEXT
+
+
+async def admin_menu_handle_item_index(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("Недоступно.")
+        return MENU
+    action = context.user_data.get('admin_menu_action')
+    if action not in {'edit', 'delete'}:
+        return await admin_manage_menu(update, context)
+    text = (update.message.text or "").strip()
+    if not text.isdigit():
+        await update.message.reply_text(
+            "Введите номер блюда цифрой.",
+            reply_markup=get_admin_back_keyboard(),
+        )
+        return ADMIN_MENU_ITEM_SELECT
+    index = int(text) - 1
+    day = context.user_data.get('admin_menu_day')
+    menu_data = _get_current_menu()
+    items = menu_data.get('menu', {}).get(day) or []
+    if index < 0 or index >= len(items):
+        await update.message.reply_text(
+            "Неверный номер. Попробуйте снова.",
+            reply_markup=get_admin_back_keyboard(),
+        )
+        return ADMIN_MENU_ITEM_SELECT
+
+    if action == 'edit':
+        context.user_data['admin_menu_item_index'] = index
+        await update.message.reply_text(
+            "Введите новый текст блюда.",
+            reply_markup=get_admin_back_keyboard(),
+        )
+        return ADMIN_MENU_ITEM_TEXT
+
+    removed = items.pop(index)
+    menu_data['menu'][day] = items
+    if save_menu(menu_data):
+        await update.message.reply_text(
+            f"Блюдо удалено: {html.escape(str(removed))}",
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        await update.message.reply_text("Не удалось сохранить изменения. Попробуйте позже.")
+    context.user_data.pop('admin_menu_action', None)
+    context.user_data.pop('admin_menu_item_index', None)
+    return await admin_menu_back_to_day_actions(update, context)
+
+
+async def admin_menu_handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("Недоступно.")
+        return MENU
+    action = context.user_data.get('admin_menu_action')
+    text = (update.message.text or "").strip()
+
+    if action == 'add':
+        if not text:
+            await update.message.reply_text(
+                "Текст не может быть пустым. Введите блюдо.",
+                reply_markup=get_admin_back_keyboard(),
+            )
+            return ADMIN_MENU_ITEM_TEXT
+        day = context.user_data.get('admin_menu_day')
+        menu_data = _get_current_menu()
+        menu_data.setdefault('menu', {}).setdefault(day, []).append(text)
+        if save_menu(menu_data):
+            await update.message.reply_text("Блюдо добавлено.")
+        else:
+            await update.message.reply_text("Не удалось сохранить изменения. Попробуйте позже.")
+        context.user_data.pop('admin_menu_action', None)
+        return await admin_menu_back_to_day_actions(update, context)
+
+    if action == 'edit':
+        if not text:
+            await update.message.reply_text(
+                "Текст не может быть пустым.",
+                reply_markup=get_admin_back_keyboard(),
+            )
+            return ADMIN_MENU_ITEM_TEXT
+        day = context.user_data.get('admin_menu_day')
+        index = context.user_data.get('admin_menu_item_index')
+        menu_data = _get_current_menu()
+        items = menu_data.get('menu', {}).get(day)
+        if items is None or index is None or index < 0 or index >= len(items):
+            await update.message.reply_text("Не удалось обновить блюдо. Попробуйте снова.")
+            return await admin_manage_menu(update, context)
+        items[index] = text
+        if save_menu(menu_data):
+            await update.message.reply_text("Блюдо обновлено.")
+        else:
+            await update.message.reply_text("Не удалось сохранить изменения. Попробуйте позже.")
+        context.user_data.pop('admin_menu_action', None)
+        context.user_data.pop('admin_menu_item_index', None)
+        return await admin_menu_back_to_day_actions(update, context)
+
+    if action == 'replace':
+        day = context.user_data.get('admin_menu_day')
+        items = _parse_menu_items(text)
+        menu_data = _get_current_menu()
+        menu_data.setdefault('menu', {})[day] = items
+        if save_menu(menu_data):
+            await update.message.reply_text("Список обновлен.")
+        else:
+            await update.message.reply_text("Не удалось сохранить изменения. Попробуйте позже.")
+        context.user_data.pop('admin_menu_action', None)
+        return await admin_menu_back_to_day_actions(update, context)
+
+    if action == 'set_week':
+        menu_data = _get_current_menu()
+        menu_data['week'] = text
+        if save_menu(menu_data):
+            await update.message.reply_text("Название недели обновлено.")
+        else:
+            await update.message.reply_text("Не удалось сохранить изменения. Попробуйте позже.")
+        context.user_data.pop('admin_menu_action', None)
+        return await admin_manage_menu(update, context)
+
+    return await admin_manage_menu(update, context)
+
+
+async def admin_menu_save_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['admin_menu_action'] = 'set_week'
+    return await admin_menu_handle_text_input(update, context)
+
+
+async def admin_menu_handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("Недоступно.")
+        return MENU
+    file_id = None
+    if update.message.photo:
+        file_id = update.message.photo[-1].file_id
+    elif update.message.document and str(update.message.document.mime_type or "").startswith("image/"):
+        file_id = update.message.document.file_id
+    if not file_id:
+        await update.message.reply_text(
+            "Отправьте фотографию или изображение (можно как файл).",
+            reply_markup=get_admin_back_keyboard(),
+        )
+        return ADMIN_MENU_PHOTO
+    try:
+        file = await context.bot.get_file(file_id)
+        target_path = "Menu.jpeg"
+        tmp_path = target_path + ".tmp"
+        await file.download_to_drive(tmp_path)
+        os.replace(tmp_path, target_path)
+    except Exception as e:
+        logging.error(f"Не удалось обновить фото меню: {e}")
+        await update.message.reply_text("Не вышло сохранить фото. Попробуйте еще раз.")
+        return ADMIN_MENU_PHOTO
+    await update.message.reply_text(
+        "Фото меню обновлено.",
+        reply_markup=get_admin_manage_menu_keyboard(),
+    )
+    return ADMIN_MENU
+
+
+async def admin_menu_back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await admin_manage_menu(update, context)
+
+
+async def admin_menu_back_to_day_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    day = context.user_data.get('admin_menu_day')
+    if not day:
+        return await admin_manage_menu(update, context)
+    menu_data = _get_current_menu()
+    items = menu_data.get('menu', {}).get(day) or []
+    lines = [f"<b>{html.escape(day)}</b>"]
+    if items:
+        for idx, item in enumerate(items, start=1):
+            lines.append(f"{idx}. {html.escape(str(item))}")
+    else:
+        lines.append("(Блюда не указаны)")
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_admin_day_actions_keyboard(),
+    )
+    return ADMIN_MENU_ACTION
+
+
+async def admin_menu_back_to_day_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    menu_data = _get_current_menu()
+    days = list(menu_data.get('menu', {}).keys())
+    if not days:
+        return await admin_manage_menu(update, context)
+    await update.message.reply_text(
+        "Выберите день.",
+        reply_markup=get_admin_day_select_keyboard(days),
+    )
+    return ADMIN_MENU_DAY_SELECT
+
+
+async def admin_menu_exit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("Недоступно.")
+        return MENU
+    await update.message.reply_text(
+        "Режим администратора.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_admin_main_keyboard(),
+    )
+    return MENU
+
 # Стартовая команда
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(update.message.from_user, "start")
@@ -346,36 +956,47 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["profile"] = saved_profile
     # Регистрируем пользователя для последующих рассылок
     ensure_user_registered(update.effective_user.id)
-    caption = (
-        "<b>Добро пожаловать!</b>\n\n"
-        "🥗 Предлагаем доставку вкусных домашних обедов.\n"
-        "В обед входит:\n"
-        " - мясное блюдо (курица или свинина) 110 гр;\n"
-        " - гарнир 300 гр;\n"
-        " - салаты 250 гр.\n"
-        "Каждую неделю новое меню.\n"
-        "Бесплатная доставка в одноразовых порционных контейнерах.\n"
-        "🫰 <b>Стоимость: 15 лари</b>\n\n"
-        "За подробностями/заказами обращайтесь по телефону: "
-        "<a href=\"tel:+995599526391\">+995599526391</a>\n"
-        "Telegram: <a href=\"https://t.me/obedy_dostavka\">@obedy_dostavka</a>\n\n"
-        "С помощью бота Вы можете:\n• Посмотреть меню на эту неделю\n• Сразу оформить заказ\n\nВыберите одну из опций ниже:"
-    )
     log_console("Пользователь начал работу с ботом")
+
+    greeting_caption = (
+        "<b>Привет! Я Batumi Lunch Bot 👋</b>\n"
+        "🥗 Домашние обеды с доставкой по Батуми\n"
+        "💸 15 лари за порцию, доставка бесплатная"
+    )
+    details_text = (
+        "Каждый обед: мясо 110 г • гарнир 300 г • салат 250 г\n"
+        "Готовим и привозим в будни с 12:30 до 15:30"
+    )
+    actions_text = (
+        "Готов помочь:\n"
+        "• Посмотреть меню недели\n"
+        "• Принять заказ\n"
+        "• Связаться с оператором "
+        "<a href=\"https://t.me/obedy_dostavka\">@obedy_dostavka</a> / "
+        "<a href=\"tel:+995599526391\">+995599526391</a>\n\n"
+        "Выберите действие на клавиатуре ниже 👇"
+    )
+
     try:
         with open("Logo.png", "rb") as logo:
             await update.message.reply_photo(
                 photo=logo,
-                caption=caption,
+                caption=greeting_caption,
                 parse_mode=ParseMode.HTML,
-                reply_markup=(get_main_menu_keyboard_admin() if is_admin else get_main_menu_keyboard()),
             )
     except FileNotFoundError:
         await update.message.reply_text(
-            caption,
-            reply_markup=(get_main_menu_keyboard_admin() if is_admin else get_main_menu_keyboard()),
+            greeting_caption,
             parse_mode=ParseMode.HTML,
         )
+
+    await update.message.reply_text(details_text, parse_mode=ParseMode.HTML)
+
+    await update.message.reply_text(
+        actions_text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=(get_main_menu_keyboard_admin() if is_admin else get_main_menu_keyboard()),
+    )
     return MENU
 
 
@@ -558,38 +1179,69 @@ def _ru_obed_plural(n: int) -> str:
     return "обедов"
 
 async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает текущие (сегодня и позже) заказы пользователя за текущую неделю."""
+    """Показывает заказы на текущую или следующую неделю в зависимости от статуса приёма."""
     user = update.effective_user
     uid = user.id
 
     now = datetime.now()
-    monday = now - timedelta(days=now.weekday())
-    start_dt = datetime(monday.year, monday.month, monday.day, 0, 0, 0)
-    end_dt = start_dt + timedelta(days=6, hours=23, minutes=59, seconds=59)
-    start_ts = int(start_dt.timestamp())
-    end_ts = int(end_dt.timestamp())
     today_idx = now.weekday()  # 0..6
 
-    day_order = {"Понедельник":0, "Вторник":1, "Среда":2, "Четверг":3, "Пятница":4, "Суббота":5, "Воскресенье":6}
+    window = _load_order_window()
+    show_next_week = False
+    target_week_start = _current_week_start(now)
+    week_start_str = window.get('week_start')
+    if window.get('next_week_enabled') and week_start_str:
+        try:
+            ws = date.fromisoformat(week_start_str)
+            if now.date() < ws:
+                show_next_week = True
+                target_week_start = ws
+            else:
+                _set_next_week_orders(False, None)
+        except Exception:
+            _set_next_week_orders(False, None)
+
+    start_dt = datetime.combine(target_week_start, datetime.min.time())
+    end_dt = start_dt + timedelta(days=7) - timedelta(seconds=1)
+    start_ts = int(start_dt.timestamp())
+    end_ts = int(end_dt.timestamp())
 
     orders = _load_orders()
-    mine = []
+    mine: list[dict] = []
     for oid, payload in orders.items():
         try:
             if int(payload.get("user_id") or 0) != uid:
                 continue
         except Exception:
             continue
-        ts = int(payload.get("created_at") or 0)
-        if not (start_ts <= ts <= end_ts):
-            continue
         status = str(payload.get("status") or "").lower()
         if status.startswith("cancel"):
             continue
         dname = str(payload.get("day") or "")
-        didx = day_order.get(dname, 99)
-        if didx < today_idx:
+        didx = DAY_TO_INDEX.get(dname, 99)
+        if didx > 4:
             continue
+        delivery_week = payload.get("delivery_week_start")
+        if delivery_week:
+            try:
+                delivery_week_date = date.fromisoformat(str(delivery_week))
+            except Exception:
+                delivery_week_date = None
+        else:
+            delivery_week_date = None
+
+        ts = int(payload.get("created_at") or 0)
+        if show_next_week:
+            if delivery_week_date != target_week_start:
+                continue
+        else:
+            if delivery_week_date and delivery_week_date != target_week_start:
+                continue
+            if not delivery_week_date and not (start_ts <= ts <= end_ts):
+                continue
+            if didx < today_idx:
+                continue
+
         item = dict(payload)
         item["__id"] = oid
         item["__didx"] = didx
@@ -597,22 +1249,24 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mine.append(item)
 
     if not mine:
-        await update.message.reply_text("У вас нет актуальных заказов на эту неделю.")
+        msg = "У вас нет заказов на следующую неделю." if show_next_week else "У вас нет актуальных заказов на эту неделю."
+        await update.message.reply_text(msg)
         return MENU
 
     mine.sort(key=lambda x: (x.get("__didx", 99), x.get("__ts", 0)))
 
-    header_parts = ["🧾 <b>Ваши текущие заказы</b>"]
-    # Отобразим неделю, если есть в меню
-    try:
-        md = load_menu() or {}
-        if md.get("week"):
-            header_parts.append(f"<i>Неделя:</i> {html.escape(str(md.get('week')))}")
-    except Exception:
-        pass
+    if show_next_week:
+        header_parts = ["🧾 <b>Заказы на следующую неделю</b>", f"<i>Неделя начинается {target_week_start.strftime('%d.%m.%Y')}</i>"]
+    else:
+        header_parts = ["🧾 <b>Ваши текущие заказы</b>"]
+        try:
+            md = load_menu() or {}
+            if md.get("week"):
+                header_parts.append(f"<i>Неделя:</i> {html.escape(str(md.get('week')))}")
+        except Exception:
+            pass
 
     lines = ["\n".join(header_parts)]
-    today_idx = datetime.now().weekday()
 
     for i, o in enumerate(mine, start=1):
         dname = str(o.get("day") or "")
@@ -624,14 +1278,12 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             count_int = 1
 
-        # Заголовок заказа: «1. Понедельник (сегодня): 2 обеда»
         title = f"{i}. <b>{html.escape(dname)}</b>"
-        if is_today:
+        if is_today and not show_next_week:
             title += " <i>(сегодня)</i>"
         title += f": <b>{count_int} {_ru_obed_plural(count_int)}</b>"
         lines.append(title)
 
-        # Пункты меню
         menu_val = o.get("menu")
         if isinstance(menu_val, list):
             items = [str(x).strip() for x in menu_val if str(x).strip()]
@@ -641,10 +1293,8 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for it in items:
                 lines.append(f"• {html.escape(it)}")
 
-        # Команда для копирования
         order_id = o.get('__id') or ''
         lines.append(f"<code>/order {html.escape(order_id)}</code>")
-        # Пустая строка-разделитель между заказами
         lines.append("")
 
     await update.message.reply_text("\n".join(lines).rstrip(), parse_mode=ParseMode.HTML)
@@ -721,6 +1371,8 @@ async def order_lunch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return MENU
     log_user_action(update.message.from_user, "order_lunch")
+    context.user_data.pop('order_for_next_week', None)
+    context.user_data.pop('order_week_start', None)
     await update.message.reply_text("<b>Выберите день недели:</b>", parse_mode=ParseMode.HTML, reply_markup=get_day_keyboard())
     return ORDER_DAY
 # Обработка выбора дня недели
@@ -731,8 +1383,17 @@ async def select_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not menu_data or day not in menu_data['menu']:
         await update.message.reply_text("<b>Ошибка:</b> выберите день недели из списка.", parse_mode=ParseMode.HTML, reply_markup=get_day_keyboard())
         return ORDER_DAY
+    day_allowed, day_warning, is_next_week, week_start_date = _is_day_available_for_order(day)
+    if not day_allowed and day_warning:
+        await update.message.reply_text(day_warning, parse_mode=ParseMode.HTML, reply_markup=get_day_keyboard())
+        return ORDER_DAY
     # Сохраняем выбранный день и показываем меню этого дня
     context.user_data['selected_day'] = day
+    context.user_data['order_for_next_week'] = bool(is_next_week)
+    if week_start_date:
+        context.user_data['order_week_start'] = week_start_date.isoformat()
+    else:
+        context.user_data['order_week_start'] = _current_week_start().isoformat()
 
     menu_for_day = menu_data['menu'][day]
     if isinstance(menu_for_day, list):
@@ -745,8 +1406,9 @@ async def select_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Сохраним текст меню в user_data, пригодится на подтверждении
     context.user_data['menu_for_day'] = menu_for_day_text
 
+    notice = "\n<i>Заказ будет оформлен на следующую неделю.</i>" if is_next_week else ""
     await update.message.reply_text(
-        f"<b>{html.escape(day)}</b>\n{menu_lines_html}\n\n<b>Сколько обедов заказать?</b>",
+        f"<b>{html.escape(day)}</b>\n{menu_lines_html}{notice}\n\n<b>Сколько обедов заказать?</b>",
         parse_mode=ParseMode.HTML,
         reply_markup=get_count_keyboard(),
     )
@@ -754,13 +1416,25 @@ async def select_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(update.message.from_user, f"select_count: {update.message.text}")
-    count_text = update.message.text
+    raw_text = (update.message.text or "").strip()
     valid_counts = ["1 обед", "2 обеда", "3 обеда", "4 обеда"]
+    digit_aliases = {
+        "1": "1 обед",
+        "2": "2 обеда",
+        "3": "3 обеда",
+        "4": "4 обеда",
+    }
+    count_text = raw_text
+    if raw_text in digit_aliases:
+        count_text = digit_aliases[raw_text]
     if count_text not in valid_counts:
         await update.message.reply_text(
-            "Пожалуйста, используйте <b>кнопки</b> для выбора количества.",
+            (
+                "Можно выбрать от <b>1</b> до <b>4</b> обедов. "
+                "Используйте кнопки ниже или введите число от 1 до 4."
+            ),
             parse_mode=ParseMode.HTML,
-            reply_markup=get_count_retry_keyboard(),
+            reply_markup=get_count_keyboard(),
         )
         return ORDER_COUNT
 
@@ -771,12 +1445,19 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "<b>Слишком часто.</b> Подождите немного и попробуйте снова или выберите другой день.",
             parse_mode=ParseMode.HTML,
-            reply_markup=get_count_retry_keyboard(),
+            reply_markup=get_count_keyboard(),
         )
         return ORDER_COUNT
 
     count = count_text.split()[0]
     day = context.user_data.get('selected_day', '(не выбран)')
+    week_start_iso = context.user_data.get('order_week_start')
+    week_start_date = None
+    if week_start_iso:
+        try:
+            week_start_date = date.fromisoformat(str(week_start_iso))
+        except Exception:
+            week_start_date = None
     menu_data = load_menu()
     menu_for_day = menu_data['menu'].get(day, '') if menu_data else ''
     if isinstance(menu_for_day, list):
@@ -788,7 +1469,7 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['menu_for_day'] = menu_for_day_text
 
     # Проверка: есть ли уже заказ на этот день у пользователя
-    same = find_user_order_same_day(update.effective_user.id, day)
+    same = find_user_order_same_day(update.effective_user.id, day, week_start_date)
     if same:
         oid, payload = same
         # Сохраним цель для дальнейшего решения
@@ -835,6 +1516,7 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             count_int = 1
         cost_lari = count_int * PRICE_LARI
+        week_notice = "\n<i>Доставка будет на следующей неделе.</i>" if context.user_data.get('order_for_next_week') else ""
         confirm_text = (
             f"<b>Подтвердите заказ</b>\n\n"
             f"<b>День:</b> {html.escape(day)}\n"
@@ -843,7 +1525,7 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<b>Сумма к оплате:</b> {cost_lari} лари\n\n"
             f"<b>Адрес доставки:</b>\n{html.escape(addr or '')}\n"
             f"<b>Телефон:</b> {html.escape(phone_line)}\n\n"
-            f"Все верно?"
+            f"Все верно?{week_notice}"
         )
         await update.message.reply_text(
             confirm_text,
@@ -856,6 +1538,7 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     menu_lines_html = "\n".join(
         f"• {html.escape(it.strip())}" for it in str(menu_for_day_text).split(',') if it.strip()
     )
+    week_notice = "\n<i>Доставка будет на следующей неделе.</i>" if context.user_data.get('order_for_next_week') else ""
     reply_text = (
         f"🎯 <b>Заказ почти готов</b>\n\n"
         f"📅 <b>{html.escape(day)}</b>\n"
@@ -867,7 +1550,7 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• ориентир для курьера\n\n"
         f"✍️ <i>Пример:</i>\n"
         f"<code>ул. Руставели 10, подъезд 2, этаж 5, кв. 42; домофон 5423; ориентир - аптека</code>\n\n"
-        f"После этого покажу итог и предложу подтвердить заказ ✅"
+        f"После этого покажу итог и предложу подтвердить заказ ✅{week_notice}"
     )
     await update.message.reply_text(reply_text, parse_mode=ParseMode.HTML, reply_markup=get_address_keyboard())
     return ADDRESS
@@ -942,6 +1625,8 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "phone": profile.get('phone'),
         "status": "new",
         "created_at": created_at,
+        "delivery_week_start": context.user_data.get('order_week_start'),
+        "next_week": bool(context.user_data.get('order_for_next_week')),
     })
 
     menu_lines_html = "\n".join(
@@ -977,14 +1662,28 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_success_gif(update)
 
     context.user_data['last_order_ts'] = time.time()
+    is_next_week_delivery = bool(context.user_data.get('order_for_next_week'))
+    delivery_week_iso = context.user_data.get('order_week_start')
     context.user_data.pop('pending_order', None)
+    context.user_data.pop('order_for_next_week', None)
+    context.user_data.pop('order_week_start', None)
 
     # Сообщение с inline-кнопкой под текстом
+    week_line = ""
+    if is_next_week_delivery and delivery_week_iso:
+        try:
+            ws = date.fromisoformat(delivery_week_iso)
+            week_line = f"\n🗓️ Доставка с {ws.strftime('%d.%m.%Y')} (следующая неделя)."
+        except Exception:
+            week_line = "\n🗓️ Доставка на следующей неделе."
+    elif is_next_week_delivery:
+        week_line = "\n🗓️ Доставка на следующей неделе."
+
     await update.message.reply_text(
         (
             f"<b>🎉 Спасибо! Заказ принят</b>\n\n"
             f"🧾 <b>ID заказа:</b> <code>{html.escape(order_id)}</code>\n"
-            f"📅 <b>Доставка:</b> {html.escape(day)}\n"
+            f"📅 <b>Доставка:</b> {html.escape(day)}{week_line}\n"
             f"⏰ <b>Окно:</b> 12:30-15:30\n"
             f"💸 <b>Сумма:</b> {cost_lari} лари\n"
             f"💳 Оплата: наличными курьеру или переводом.\n\n"
@@ -1056,6 +1755,7 @@ async def confirm_save_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception:
         count_int = 1
     cost_lari = count_int * PRICE_LARI
+    week_notice = "\n<i>Доставка будет на следующей неделе.</i>" if context.user_data.get('order_for_next_week') else ""
     confirm_text = (
         f"<b>Подтвердите заказ</b>\n\n"
         f"<b>День:</b> {html.escape(day)}\n"
@@ -1064,7 +1764,7 @@ async def confirm_save_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"<b>Сумма к оплате:</b> {cost_lari} лари\n\n"
         f"<b>Адрес доставки:</b>\n{html.escape(addr or '')}\n"
         f"<b>Телефон:</b> {html.escape(phone_line)}\n\n"
-        f"Все верно?"
+        f"Все верно?{week_notice}"
     )
     await update.message.reply_text(
         confirm_text,
@@ -1122,6 +1822,7 @@ async def resolve_duplicate_order(update: Update, context: ContextTypes.DEFAULT_
             menu_lines_html = "\n".join(
                 f" - {html.escape(it.strip())}" for it in str(menu_for_day_text).split(',') if it.strip()
             )
+            week_notice = "\n<i>Доставка будет на следующей неделе.</i>" if context.user_data.get('order_for_next_week') else ""
             confirm_text = (
                 f"<b>Подтвердите заказ</b>\n\n"
                 f"<b>День:</b> {html.escape(day)}\n"
@@ -1130,7 +1831,7 @@ async def resolve_duplicate_order(update: Update, context: ContextTypes.DEFAULT_
                 f"<b>Сумма к оплате:</b> {cost_lari} лари\n\n"
                 f"<b>Адрес доставки:</b>\n{html.escape(addr or '')}\n"
                 f"<b>Телефон:</b> {html.escape(phone_line)}\n\n"
-                f"Все верно?"
+                f"Все верно?{week_notice}"
             )
             await update.message.reply_text(
                 confirm_text,
@@ -1144,6 +1845,7 @@ async def resolve_duplicate_order(update: Update, context: ContextTypes.DEFAULT_
             menu_lines_html = "\n".join(
                 f"• {html.escape(it.strip())}" for it in str(menu_for_day_text).split(',') if it.strip()
             )
+            week_notice = "\n<i>Доставка будет на следующей неделе.</i>" if context.user_data.get('order_for_next_week') else ""
             reply_text = (
                 f"🎯 <b>Заказ почти готов</b>\n\n"
                 f"📅 <b>{html.escape(day)}</b>\n"
@@ -1153,7 +1855,7 @@ async def resolve_duplicate_order(update: Update, context: ContextTypes.DEFAULT_
                 f"• улица и дом\n"
                 f"• подъезд/этаж/квартира\n"
                 f"• ориентир для курьера\n\n"
-                f"После этого покажу итог и предложу подтвердить заказ ✅"
+                f"После этого покажу итог и предложу подтвердить заказ ✅{week_notice}"
             )
             await update.message.reply_text(reply_text, parse_mode=ParseMode.HTML, reply_markup=get_address_keyboard())
             context.user_data.pop('duplicate_target', None)
@@ -1483,9 +2185,13 @@ async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = get_main_menu_keyboard_admin()
     elif is_admin and admin_ui:
         kb = get_admin_main_keyboard()
-    await update.message.reply_text(
-        "Пожалуйста, используйте <b>кнопки</b> для навигации.", parse_mode=ParseMode.HTML, reply_markup=kb
+    hint = _build_fallback_hint(context, is_admin)
+    message = (
+        "Кажется, я не распознал сообщение 🤔\n"
+        f"{hint}\n\n"
+        "Команда /start всегда возвращает в начало диалога."
     )
+    await update.message.reply_text(message, parse_mode=ParseMode.HTML, reply_markup=kb)
     return MENU
 
 
@@ -1513,6 +2219,34 @@ async def contact_human(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
     return
 
+
+def _build_fallback_hint(context: ContextTypes.DEFAULT_TYPE, is_admin: bool) -> str:
+    """Возвращает подсказку для fallback-ответа в зависимости от шага пользователя."""
+    admin_ui = context.user_data.get('admin_ui', True)
+    if is_admin and admin_ui:
+        return (
+            "Вы сейчас в <b>режиме администратора</b>. "
+            "Выберите пункт на клавиатуре или отправьте /start, чтобы вернуться в начало."
+        )
+    if context.user_data.get('duplicate_target'):
+        return (
+            "Нужно решить, что делать с предыдущим заказом. Нажмите «Удалить предыдущий заказ» "
+            "или «Добавить к существующему»."
+        )
+    if context.user_data.get('pending_order'):
+        return (
+            "Мы на шаге <b>подтверждения заказа</b>. Используйте кнопки «Подтверждаю» или "
+            "«Изменить адрес», либо отправьте телефон."
+        )
+    if context.user_data.get('selected_count'):
+        return (
+            "Осталось <b>указать адрес доставки</b>. Напишите адрес одним сообщением "
+            "или нажмите «Отправить телефон»."
+        )
+    if context.user_data.get('selected_day'):
+        return "Сейчас нужно выбрать <b>количество обедов</b> на клавиатуре (от 1 до 4)."
+    return "Выберите действие на главной клавиатуре или отправьте /start, чтобы начать сначала."
+
 # Универсальное логирование нажатий любых кнопок (ReplyKeyboard)
 BUTTON_TEXTS = [
     "Показать меню на неделю",
@@ -1522,6 +2256,17 @@ BUTTON_TEXTS = [
     "Добавить к существующему",
     "Перейти в режим пользователя",
     "Перейти в режим администратора",
+    "Управление меню",
+    "Изменить название недели",
+    "Редактировать блюда дня",
+    "Обновить фото меню",
+    "Открыть заказы на следующую неделю",
+    "Добавить блюдо",
+    "Изменить блюдо",
+    "Удалить блюдо",
+    "Заменить список блюд",
+    "Да",
+    "Нет",
     "Неделя целиком",
     "Заказать обед",
     "Посмотреть меню",
@@ -1627,6 +2372,7 @@ if __name__ == "__main__":
                 MessageHandler(filters.Regex("^Мои заказы$"), my_orders),
                 MessageHandler(filters.Regex("^Перейти в режим пользователя$"), switch_to_user_mode),
                 MessageHandler(filters.Regex("^Перейти в режим администратора$"), switch_to_admin_mode),
+                MessageHandler(filters.Regex("^Управление меню$"), admin_manage_menu),
                 MessageHandler(filters.Regex("^(Неделя целиком|Понедельник|Вторник|Среда|Четверг|Пятница)$"), admin_report_pick),
                 MessageHandler(filters.Regex("^Заказать обед$"), order_lunch),
                 MessageHandler(filters.Regex("^Посмотреть меню$"), show_menu),
@@ -1646,7 +2392,7 @@ if __name__ == "__main__":
             ORDER_COUNT: [
                 MessageHandler(filters.Regex("^Назад$"), back_to_day),
                 MessageHandler(filters.Regex("^Выбрать день заново$"), order_lunch),
-                MessageHandler(filters.Regex("^(1 обед|2 обеда|3 обеда|4 обеда)$"), select_count),
+                MessageHandler(filters.Regex("^(1 обед|2 обеда|3 обеда|4 обеда|[1-4])$"), select_count),
                 MessageHandler(filters.Regex("^🔄 В начало$"), start),
                 MessageHandler(filters.Regex("^В начало$"), start),
                 MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
@@ -1677,6 +2423,69 @@ if __name__ == "__main__":
                 MessageHandler(filters.Regex("^В начало$"), start),
                 MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
+            ],
+            ADMIN_MENU: [
+                MessageHandler(filters.Regex("^Изменить название недели$"), admin_menu_request_week),
+                MessageHandler(filters.Regex("^Редактировать блюда дня$"), admin_menu_show_day_prompt),
+                MessageHandler(filters.Regex("^Обновить фото меню$"), admin_menu_request_photo),
+                MessageHandler(filters.Regex("^Открыть заказы на следующую неделю$"), admin_open_next_week_orders),
+                MessageHandler(filters.Regex("^Назад$"), admin_menu_exit),
+                MessageHandler(filters.Regex("^🔄 В начало$"), start),
+                MessageHandler(filters.Regex("^В начало$"), start),
+                MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
+                MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
+            ],
+            ADMIN_MENU_DAY_SELECT: [
+                MessageHandler(filters.Regex("^Назад$"), admin_menu_back_to_main),
+                MessageHandler(filters.Regex("^🔄 В начало$"), start),
+                MessageHandler(filters.Regex("^В начало$"), start),
+                MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
+                MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_menu_day_chosen),
+            ],
+            ADMIN_MENU_ACTION: [
+                MessageHandler(filters.Regex("^Добавить блюдо$"), admin_menu_day_action_add),
+                MessageHandler(filters.Regex("^Изменить блюдо$"), admin_menu_day_action_edit),
+                MessageHandler(filters.Regex("^Удалить блюдо$"), admin_menu_day_action_delete),
+                MessageHandler(filters.Regex("^Заменить список блюд$"), admin_menu_day_action_replace),
+                MessageHandler(filters.Regex("^Назад$"), admin_menu_back_to_day_select),
+                MessageHandler(filters.Regex("^🔄 В начало$"), start),
+                MessageHandler(filters.Regex("^В начало$"), start),
+                MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
+                MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
+            ],
+            ADMIN_MENU_ITEM_SELECT: [
+                MessageHandler(filters.Regex("^Назад$"), admin_menu_back_to_day_actions),
+                MessageHandler(filters.Regex("^🔄 В начало$"), start),
+                MessageHandler(filters.Regex("^В начало$"), start),
+                MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
+                MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_menu_handle_item_index),
+            ],
+            ADMIN_MENU_ITEM_TEXT: [
+                MessageHandler(filters.Regex("^Назад$"), admin_menu_back_to_day_actions),
+                MessageHandler(filters.Regex("^🔄 В начало$"), start),
+                MessageHandler(filters.Regex("^В начало$"), start),
+                MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
+                MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_menu_handle_text_input),
+            ],
+            ADMIN_MENU_WEEK: [
+                MessageHandler(filters.Regex("^Назад$"), admin_manage_menu),
+                MessageHandler(filters.Regex("^🔄 В начало$"), start),
+                MessageHandler(filters.Regex("^В начало$"), start),
+                MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
+                MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_menu_save_week),
+            ],
+            ADMIN_MENU_PHOTO: [
+                MessageHandler(filters.Regex("^Назад$"), admin_manage_menu),
+                MessageHandler(filters.Regex("^🔄 В начало$"), start),
+                MessageHandler(filters.Regex("^В начало$"), start),
+                MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
+                MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
+                MessageHandler((filters.PHOTO | filters.Document.IMAGE), admin_menu_handle_photo),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_menu_handle_photo),
             ],
         },
         fallbacks=[CommandHandler("start", start), MessageHandler(filters.ALL, fallback)]
