@@ -6,15 +6,25 @@ from config_secret import BOT_TOKEN, ADMIN_ID
 
 # Дополнительные контакты оператора (опционально из config_secret)
 try:
-    from config_secret import OPERATOR_HANDLE, OPERATOR_PHONE
+    from config_secret import OPERATOR_HANDLE
 except Exception:
     OPERATOR_HANDLE = "@vitperson"
+
+try:
+    from config_secret import OPERATOR_PHONE
+except Exception:
     OPERATOR_PHONE = "недоступен"
+
+try:
+    from config_secret import OPERATOR_INSTAGRAM
+except Exception:
+    OPERATOR_INSTAGRAM = ""
 
 import logging
 import json
 import re
 import secrets
+from urllib.parse import urlparse
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters, ConversationHandler, PicklePersistence
 from keyboards import (
@@ -62,11 +72,20 @@ DAY_TO_INDEX = {
 }
 ORDER_CUTOFF_HOUR = 10  # Заказы на день принимаются до 10:00 этого дня
 
+DAY_PHOTO_MAP = {
+    "Понедельник": os.path.join("DishPhotos", "Monday.png"),
+    "Вторник": os.path.join("DishPhotos", "Tuesday.png"),
+    "Среда": os.path.join("DishPhotos", "Wednesday.png"),
+    "Четверг": os.path.join("DishPhotos", "Thursday.png"),
+    "Пятница": os.path.join("DishPhotos", "Friday.png"),
+}
+
 # Состояния для ConversationHandler
 (
     MENU,
     ORDER_DAY,
     ORDER_COUNT,
+    UPDATE_ORDER_COUNT,
     ADDRESS,
     CONFIRM,
     DUPLICATE,
@@ -77,7 +96,7 @@ ORDER_CUTOFF_HOUR = 10  # Заказы на день принимаются до
     ADMIN_MENU_ITEM_TEXT,
     ADMIN_MENU_WEEK,
     ADMIN_MENU_PHOTO,
-) = range(13)
+) = range(14)
 
 # Настройка логирования с TimedRotatingFileHandler
 logger = logging.getLogger()
@@ -346,6 +365,18 @@ def _set_next_week_orders(enabled: bool, week_start: date | None = None) -> None
 def _current_week_start(now: datetime | None = None) -> date:
     now = now or datetime.now()
     return (now - timedelta(days=now.weekday())).date()
+
+
+def _build_order_actions_keyboard(order_id: str, allow_change: bool = True, allow_cancel: bool = True) -> InlineKeyboardMarkup | None:
+    buttons: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    if allow_change:
+        row.append(InlineKeyboardButton("Изменить заказ", callback_data=f"change_order:{order_id}"))
+    if allow_cancel:
+        row.append(InlineKeyboardButton("Отменить этот заказ", callback_data=f"cancel_order:{order_id}"))
+    if row:
+        buttons.append(row)
+    return InlineKeyboardMarkup(buttons) if buttons else None
 
 
 def _base36(n: int) -> str:
@@ -958,6 +989,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_user_registered(update.effective_user.id)
     log_console("Пользователь начал работу с ботом")
 
+    contacts = _prepare_operator_contacts()
+    contact_links: list[str] = []
+    if contacts["handle"]:
+        handle = contacts["handle"]
+        contact_links.append(
+            f"<a href=\"https://t.me/{html.escape(handle)}\">@{html.escape(handle)}</a>"
+        )
+    if contacts["phone_href"]:
+        phone_display = contacts["phone_display"] or contacts["phone_href"]
+        contact_links.append(
+            f"<a href=\"tel:{html.escape(contacts['phone_href'])}\">{html.escape(phone_display)}</a>"
+        )
+    if contacts["instagram_url"]:
+        contact_links.append(
+            f"<a href=\"{html.escape(contacts['instagram_url'])}\">{html.escape(contacts['instagram_label'])}</a>"
+        )
+    if contact_links:
+        contact_line = "• Связаться с оператором " + " / ".join(contact_links)
+    else:
+        contact_line = "• Связаться с оператором — контакты временно недоступны"
+
     greeting_caption = (
         "<b>Привет! Я Batumi Lunch Bot 👋</b>\n"
         "🥗 Домашние обеды с доставкой по Батуми\n"
@@ -971,9 +1023,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Готов помочь:\n"
         "• Посмотреть меню недели\n"
         "• Принять заказ\n"
-        "• Связаться с оператором "
-        "<a href=\"https://t.me/obedy_dostavka\">@obedy_dostavka</a> / "
-        "<a href=\"tel:+995599526391\">+995599526391</a>\n\n"
+        f"{contact_line}\n\n"
         "Выберите действие на клавиатуре ниже 👇"
     )
 
@@ -1407,8 +1457,29 @@ async def select_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['menu_for_day'] = menu_for_day_text
 
     notice = "\n<i>Заказ будет оформлен на следующую неделю.</i>" if is_next_week else ""
+    message_text = (
+        f"<b>{html.escape(day)}</b>\n{menu_lines_html}{notice}\n\n"
+        f"<b>Сколько обедов заказать?</b>"
+    )
+
+    photo_path = DAY_PHOTO_MAP.get(day)
+    if photo_path:
+        try:
+            with open(photo_path, "rb") as photo:
+                await update.message.reply_photo(
+                    photo=photo,
+                    caption=message_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_count_keyboard(),
+                )
+            return ORDER_COUNT
+        except FileNotFoundError:
+            logging.warning(f"Фото для {day} не найдено по пути {photo_path}")
+        except Exception as e:
+            logging.error(f"Не удалось отправить фото для {day}: {e}")
+
     await update.message.reply_text(
-        f"<b>{html.escape(day)}</b>\n{menu_lines_html}{notice}\n\n<b>Сколько обедов заказать?</b>",
+        message_text,
         parse_mode=ParseMode.HTML,
         reply_markup=get_count_keyboard(),
     )
@@ -1690,9 +1761,7 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<b>🔎 Посмотреть детали позже:</b>\n"
             f"<code>/order {html.escape(order_id)}</code>"
         ),
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Отменить этот заказ", callback_data=f"cancel_order:{order_id}")]
-        ]),
+        reply_markup=_build_order_actions_keyboard(order_id),
         parse_mode=ParseMode.HTML,
     )
     # Отдельно пришлем клавиатуру с действиями после подтверждения
@@ -2064,9 +2133,7 @@ async def order_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Кнопка отмены для активного заказа (new) и при наличии прав (владелец или админ)
     reply_kb = None
     if (is_admin or is_owner) and str(status).lower() == "new":
-        reply_kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Отменить этот заказ", callback_data=f"cancel_order:{order_id}")]
-        ])
+        reply_kb = _build_order_actions_keyboard(order_id, allow_change=is_owner, allow_cancel=True)
     await update.message.reply_text(text_html, parse_mode=ParseMode.HTML, reply_markup=reply_kb)
 
 #
@@ -2159,6 +2226,139 @@ async def cancel_order_callback(update: Update, context: ContextTypes.DEFAULT_TY
             parse_mode=ParseMode.HTML,
         )
 
+
+async def change_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data_cb = (query.data or "")
+    if not data_cb.startswith("change_order:"):
+        return
+    order_id = data_cb.split(":", 1)[1]
+    order = get_order(order_id)
+    if not order:
+        await query.answer("Заказ не найден", show_alert=True)
+        return
+    user_id = query.from_user.id
+    is_admin = (user_id == ADMIN_ID)
+    is_owner = (order.get("user_id") == user_id)
+    if not (is_admin or is_owner):
+        await query.answer("Нет доступа", show_alert=True)
+        return
+    status = str(order.get("status") or "").lower()
+    if status != "new":
+        await query.answer("Изменения недоступны: заказ уже в обработке.", show_alert=True)
+        return
+
+    day = str(order.get("day") or "")
+    raw_count = order.get("count", 1)
+    try:
+        current_count_int = int(str(raw_count).split()[0])
+    except Exception:
+        current_count_int = 1
+    current_count = str(current_count_int)
+    context.user_data['update_order'] = {
+        'id': order_id,
+        'day': day,
+        'menu': order.get('menu'),
+        'count': current_count,
+        'delivery_week_start': order.get('delivery_week_start'),
+        'next_week': bool(order.get('next_week')),
+    }
+    context.user_data['selected_day'] = day
+    context.user_data['menu_for_day'] = order.get('menu', '')
+    if order.get('delivery_week_start'):
+        context.user_data['order_week_start'] = str(order.get('delivery_week_start'))
+    else:
+        context.user_data['order_week_start'] = _current_week_start().isoformat()
+    context.user_data['order_for_next_week'] = bool(order.get('next_week'))
+    prompt = (
+        f"<b>Изменение заказа</b>\n\n"
+        f"Текущий день: <b>{html.escape(day)}</b>\n"
+        f"Текущее количество: <b>{html.escape(str(current_count_int))}</b> {_ru_obed_plural(current_count_int)}\n\n"
+        "Выберите новое количество на клавиатуре ниже."
+    )
+    await query.message.reply_text(
+        prompt,
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_count_keyboard(),
+    )
+    return UPDATE_ORDER_COUNT
+
+
+async def update_order_count_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    update_ctx = context.user_data.get('update_order')
+    if not update_ctx:
+        await update.message.reply_text("Заказ для изменения не найден. Попробуйте снова перейти через кнопку.")
+        return MENU
+
+    raw_text = (update.message.text or "").strip()
+    valid_counts = {"1", "2", "3", "4"}
+    digit_aliases = {
+        "1 обед": "1",
+        "2 обеда": "2",
+        "3 обеда": "3",
+        "4 обеда": "4",
+    }
+    selected = digit_aliases.get(raw_text, raw_text)
+    if selected not in valid_counts:
+        await update.message.reply_text(
+            "Выберите количество от 1 до 4 с клавиатуры или числом.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_count_keyboard(),
+        )
+        return UPDATE_ORDER_COUNT
+
+    new_count = int(selected)
+    order_id = update_ctx['id']
+    orders = _load_orders()
+    if order_id not in orders:
+        await update.message.reply_text("Не удалось найти заказ. Возможно, он уже был изменен или отменен.")
+        context.user_data.pop('update_order', None)
+        return MENU
+
+    orders[order_id]['count'] = str(new_count)
+    orders[order_id]['updated_at'] = int(time.time())
+    _save_orders(orders)
+
+    # Уведомим администратора
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=(
+                f"<b>✏️ Изменение заказа</b> <code>{html.escape(order_id)}</code>\n"
+                f"Клиент: {admin_link_html(update.effective_user)}\n"
+                f"Новый объем: {new_count} {_ru_obed_plural(new_count)}"
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception:
+        pass
+
+    context.user_data.pop('update_order', None)
+    context.user_data.pop('menu_for_day', None)
+    context.user_data.pop('selected_day', None)
+    context.user_data.pop('order_week_start', None)
+    context.user_data.pop('order_for_next_week', None)
+
+    await update.message.reply_text(
+        (
+            f"Количество обновлено: <b>{new_count} {_ru_obed_plural(new_count)}</b>\n"
+            f"<code>/order {html.escape(order_id)}</code>"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_after_confirm_keyboard(),
+    )
+    return MENU
+
+
+async def cancel_update_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop('update_order', None)
+    await update.message.reply_text(
+        "Изменение заказа отменено.",
+        reply_markup=get_after_confirm_keyboard(),
+    )
+    return MENU
+
 #
 # Callback: скопировать номер заказа
 async def copy_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2206,16 +2406,60 @@ async def my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"<b>Ваш сохраненный профиль:</b>\n<pre>{html.escape(pretty)}</pre>", parse_mode=ParseMode.HTML)
 
 
+# Формируем подпись для Instagram-ссылки
+def _get_instagram_label(url: str) -> str:
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    label = parsed.path.strip("/")
+    if label:
+        label = label.split("/")[-1]
+    else:
+        label = parsed.netloc or url
+    if "?" in label:
+        label = label.split("?")[0]
+    return label or "Instagram"
+
+
+def _prepare_operator_contacts() -> dict[str, str]:
+    handle = (OPERATOR_HANDLE or "").lstrip("@").strip()
+    phone_display = (OPERATOR_PHONE or "").strip()
+    phone_href = re.sub(r"[^\d+]", "", phone_display)
+    instagram_url = (OPERATOR_INSTAGRAM or "").strip()
+    instagram_label = _get_instagram_label(instagram_url) if instagram_url else ""
+    return {
+        "handle": handle,
+        "phone_display": phone_display,
+        "phone_href": phone_href,
+        "instagram_url": instagram_url,
+        "instagram_label": instagram_label,
+    }
+
+
 # Handler for "Связаться с человеком" button
 async def contact_human(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    handle = (OPERATOR_HANDLE or "").lstrip("@")
-    phone = OPERATOR_PHONE or ""
-    parts = []
-    if handle:
-        parts.append(f"\nTelegram: <a href=\"https://t.me/{html.escape(handle)}\">@{html.escape(handle)}</a>")
-    if phone:
-        parts.append(f"\nпо телефону: <a href=\"tel:{html.escape(phone)}\">{html.escape(phone)}</a>")
-    msg = "Связаться с оператором можно через " + "\nили ".join(parts) if parts else "Контакты оператора временно недоступны."
+    contacts = _prepare_operator_contacts()
+    parts: list[str] = []
+    if contacts["handle"]:
+        handle = contacts["handle"]
+        parts.append(
+            f"Telegram: <a href=\"https://t.me/{html.escape(handle)}\">@{html.escape(handle)}</a>"
+        )
+    if contacts["phone_href"]:
+        phone_display = contacts["phone_display"] or contacts["phone_href"]
+        parts.append(
+            "по телефону: "
+            f"<a href=\"tel:{html.escape(contacts['phone_href'])}\">{html.escape(phone_display)}</a>"
+        )
+    if contacts["instagram_url"]:
+        parts.append(
+            "Instagram: "
+            f"<a href=\"{html.escape(contacts['instagram_url'])}\">{html.escape(contacts['instagram_label'])}</a>"
+        )
+    if parts:
+        msg = "Связаться с оператором можно через:\n" + "\n".join(parts)
+    else:
+        msg = "Контакты оператора временно недоступны."
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
     return
 
@@ -2232,6 +2476,11 @@ def _build_fallback_hint(context: ContextTypes.DEFAULT_TYPE, is_admin: bool) -> 
         return (
             "Нужно решить, что делать с предыдущим заказом. Нажмите «Удалить предыдущий заказ» "
             "или «Добавить к существующему»."
+        )
+    if context.user_data.get('update_order'):
+        return (
+            "Мы меняем количество в заказе. Выберите новое значение на клавиатуре "
+            "или нажмите «Назад», чтобы отменить изменения."
         )
     if context.user_data.get('pending_order'):
         return (
@@ -2261,6 +2510,7 @@ BUTTON_TEXTS = [
     "Редактировать блюда дня",
     "Обновить фото меню",
     "Открыть заказы на следующую неделю",
+    "Изменить заказ",
     "Добавить блюдо",
     "Изменить блюдо",
     "Удалить блюдо",
@@ -2367,6 +2617,7 @@ if __name__ == "__main__":
         ],
         states={
             MENU: [
+                CallbackQueryHandler(change_order_callback, pattern=r"^change_order:"),
                 MessageHandler(filters.Regex("^Показать меню на неделю$"), show_menu),
                 MessageHandler(filters.Regex("^Показать заказы на эту неделю$"), admin_show_week_orders),
                 MessageHandler(filters.Regex("^Мои заказы$"), my_orders),
@@ -2390,9 +2641,18 @@ if __name__ == "__main__":
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
             ],
             ORDER_COUNT: [
+                CallbackQueryHandler(change_order_callback, pattern=r"^change_order:"),
                 MessageHandler(filters.Regex("^Назад$"), back_to_day),
                 MessageHandler(filters.Regex("^Выбрать день заново$"), order_lunch),
                 MessageHandler(filters.Regex("^(1 обед|2 обеда|3 обеда|4 обеда|[1-4])$"), select_count),
+                MessageHandler(filters.Regex("^🔄 В начало$"), start),
+                MessageHandler(filters.Regex("^В начало$"), start),
+                MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
+                MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
+            ],
+            UPDATE_ORDER_COUNT: [
+                MessageHandler(filters.Regex("^Назад$"), cancel_update_order),
+                MessageHandler(filters.Regex("^(1 обед|2 обеда|3 обеда|4 обеда|[1-4])$"), update_order_count_choice),
                 MessageHandler(filters.Regex("^🔄 В начало$"), start),
                 MessageHandler(filters.Regex("^В начало$"), start),
                 MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
