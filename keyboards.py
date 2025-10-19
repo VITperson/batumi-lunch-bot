@@ -10,7 +10,7 @@ def get_main_menu_keyboard():
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton("Показать меню на неделю"), KeyboardButton("Заказать обед")],
-            [KeyboardButton("Мои заказы")],
+            [KeyboardButton("Заказать на всю неделю"), KeyboardButton("Мои заказы")],
             [KeyboardButton("🔄 В начало"), KeyboardButton("❗ Связаться с человеком")],
         ],
         resize_keyboard=True,
@@ -21,7 +21,7 @@ def get_main_menu_keyboard_admin():
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton("Показать меню на неделю"), KeyboardButton("Заказать обед")],
-            [KeyboardButton("Мои заказы")],
+            [KeyboardButton("Заказать на всю неделю"), KeyboardButton("Мои заказы")],
             [KeyboardButton("Перейти в режим администратора")],
             [KeyboardButton("🔄 В начало"), KeyboardButton("❗ Связаться с человеком")],
         ],
@@ -85,7 +85,6 @@ def get_address_keyboard():
         resize_keyboard=True,
     )
 
-
 def get_order_prompt_keyboard():
     rows = [
         [KeyboardButton("Да"), KeyboardButton("Выбрать день недели")],
@@ -93,11 +92,10 @@ def get_order_prompt_keyboard():
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
-
 def get_after_confirm_keyboard():
     rows = [
         [KeyboardButton("Посмотреть меню"), KeyboardButton("Выбрать еще один день")],
-        [KeyboardButton("Мои заказы")],
+        [KeyboardButton("Заказать на всю неделю"), KeyboardButton("Мои заказы")],
         [KeyboardButton("🔄 В начало"), KeyboardButton("❗ Связаться с человеком")],
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
@@ -106,6 +104,15 @@ def get_duplicate_resolution_keyboard():
     rows = [
         [KeyboardButton("Удалить предыдущий заказ")],
         [KeyboardButton("Добавить к существующему")],
+        [KeyboardButton("🔄 В начало"), KeyboardButton("❗ Связаться с человеком")],
+    ]
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+def get_weekly_duplicate_keyboard():
+    rows = [
+        [KeyboardButton("Заменить предыдущие заказы")],
+        [KeyboardButton("Добавить к существующим")],
+        [KeyboardButton("Отменить оформление")],
         [KeyboardButton("🔄 В начало"), KeyboardButton("❗ Связаться с человеком")],
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
@@ -128,7 +135,6 @@ def get_admin_report_keyboard():
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
-
 def get_admin_manage_menu_keyboard():
     rows = [
         [KeyboardButton("Изменить название недели"), KeyboardButton("Редактировать блюда дня")],
@@ -136,7 +142,6 @@ def get_admin_manage_menu_keyboard():
         [KeyboardButton("Назад"), KeyboardButton("🔄 В начало")],
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
-
 
 def get_admin_day_select_keyboard(days: list[str]):
     rows = []
@@ -151,7 +156,6 @@ def get_admin_day_select_keyboard(days: list[str]):
     rows.append([KeyboardButton("Назад"), KeyboardButton("🔄 В начало")])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
-
 def get_admin_day_actions_keyboard():
     rows = [
         [KeyboardButton("Добавить блюдо"), KeyboardButton("Изменить блюдо")],
@@ -160,14 +164,12 @@ def get_admin_day_actions_keyboard():
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
-
 def get_admin_confirm_keyboard():
     rows = [
         [KeyboardButton("Да"), KeyboardButton("Нет")],
         [KeyboardButton("Назад"), KeyboardButton("🔄 В начало")],
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
-
 
 def get_admin_back_keyboard():
     rows = [
