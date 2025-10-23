@@ -138,6 +138,20 @@ def log_console(message):
     console_handler.stream.write(message + "\n")
     console_handler.flush()
 
+async def send_success_gif(update: Update) -> None:
+    """Sends celebration animation when available, otherwise keeps silent."""
+    message = update.effective_message
+    if not message:
+        return
+    media_path = "cat-driving.mp4"
+    if not os.path.exists(media_path):
+        return
+    try:
+        with open(media_path, "rb") as media:
+            await message.reply_animation(animation=media)
+    except Exception as exc:
+        logging.warning(f"Не удалось отправить анимацию подтверждения: {exc}")
+
 # Загрузка меню
 
 def load_menu():
@@ -1128,6 +1142,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Выберите действие на клавиатуре ниже 👇"
     )
 
+    main_keyboard = get_main_menu_keyboard_admin() if is_admin else get_main_menu_keyboard()
+    inline_start_markup = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("показать меню", callback_data="start_show_menu")]]
+    )
+
     try:
         with open("Logo.png", "rb") as logo:
             await update.message.reply_photo(
@@ -1141,12 +1160,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML,
         )
 
-    await update.message.reply_text(details_text, parse_mode=ParseMode.HTML)
+    await update.message.reply_text(
+        details_text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_keyboard,
+    )
 
     await update.message.reply_text(
         actions_text,
         parse_mode=ParseMode.HTML,
-        reply_markup=(get_main_menu_keyboard_admin() if is_admin else get_main_menu_keyboard()),
+        reply_markup=inline_start_markup,
     )
     return MENU
 
@@ -1485,30 +1508,46 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    is_admin = (update.effective_user.id == ADMIN_ID)
+    query = update.callback_query
+    if query:
+        await query.answer()
+    user = update.effective_user
+    message = update.effective_message
+
+    is_admin = (user.id == ADMIN_ID)
     if is_admin and context.user_data.get('admin_ui', True):
-        await update.message.reply_text(
+        await message.reply_text(
             "Вы админ. Используйте кнопку: Показать заказы на эту неделю.",
             reply_markup=get_admin_main_keyboard(),
         )
         return MENU
-    log_user_action(update.message.from_user, "show_menu")
+    log_user_action(user, "show_menu")
     menu_data = load_menu()
     if not menu_data:
-        await update.message.reply_text("Техническая ошибка: меню недоступно. Попробуйте позже.", reply_markup=add_start_button())
+        await message.reply_text(
+            "Техническая ошибка: меню недоступно. Попробуйте позже.",
+            reply_markup=add_start_button(),
+        )
         return MENU
     text_html = format_menu_html(menu_data)
     try:
         with open("Menu.jpeg", "rb") as photo:
-            await update.message.reply_photo(
+            await message.reply_photo(
                 photo=photo,
                 reply_markup=add_start_button()
             )
     except FileNotFoundError:
         pass
-    await update.message.reply_text(text_html, parse_mode=ParseMode.HTML, reply_markup=add_start_button())
-    await update.message.reply_text(
-        "<b>Выберите день недели:</b>", parse_mode=ParseMode.HTML, reply_markup=get_day_keyboard()
+    await message.reply_text(
+        text_html,
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_day_keyboard(),
+    )
+    await message.reply_text(
+        "Быстрый выбор:",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Заказать на всю неделю", callback_data="start_weekly_order")]]
+        ),
     )
     return ORDER_DAY
 
@@ -1528,18 +1567,24 @@ async def order_lunch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("<b>Выберите день недели:</b>", parse_mode=ParseMode.HTML, reply_markup=get_day_keyboard())
     return ORDER_DAY
 async def order_week_lunch(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    is_admin = (update.effective_user.id == ADMIN_ID)
+    query = update.callback_query
+    if query:
+        await query.answer()
+    user = update.effective_user
+    message = update.effective_message
+
+    is_admin = (user.id == ADMIN_ID)
     if is_admin and context.user_data.get('admin_ui', True):
-        await update.message.reply_text(
+        await message.reply_text(
             "Вы админ. Используйте кнопку: Показать заказы на эту неделю.",
             reply_markup=get_admin_main_keyboard(),
         )
         return MENU
-    log_user_action(update.message.from_user, "order_week_lunch")
+    log_user_action(user, "order_week_lunch")
     menu_data = load_menu()
     main_keyboard = get_main_menu_keyboard_admin() if is_admin else get_main_menu_keyboard()
     if not menu_data or not isinstance(menu_data.get('menu'), dict) or not menu_data['menu']:
-        await update.message.reply_text(
+        await message.reply_text(
             "Меню недели пока не заполнено. Попросите администратора обновить меню.",
             reply_markup=main_keyboard,
         )
@@ -1548,7 +1593,7 @@ async def order_week_lunch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     menu_block = menu_data['menu']
     ordered_days = [day for day in DAY_TO_INDEX if day in menu_block]
     if not ordered_days:
-        await update.message.reply_text(
+        await message.reply_text(
             "Меню на неделю пока отсутствует. Попросите администратора обновить меню.",
             reply_markup=main_keyboard,
         )
@@ -1590,7 +1635,7 @@ async def order_week_lunch(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     lines.append(str(warning))
                 elif day:
                     lines.append(f"• {html.escape(day)} — недоступно.")
-        await update.message.reply_text(
+        await message.reply_text(
             "\n".join(lines),
             parse_mode=ParseMode.HTML,
             reply_markup=main_keyboard,
@@ -1607,7 +1652,7 @@ async def order_week_lunch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _set_weekly_picker_state(context, picker_state)
 
     message_text = _weekly_picker_text(picker_state)
-    await update.message.reply_text(
+    await message.reply_text(
         message_text,
         parse_mode=ParseMode.HTML,
         reply_markup=_weekly_picker_keyboard(picker_state),
@@ -2245,8 +2290,6 @@ async def _finalize_single_order(update: Update, context: ContextTypes.DEFAULT_T
     except Exception:
         count_int = 1
     cost_lari = count_int * PRICE_LARI
-    prep = _prep_for_day(day)
-
     user = update.message.from_user
     username = f"@{user.username}" if user.username else "(нет username)"
     order_id = make_order_id(user.id)
@@ -2421,7 +2464,7 @@ async def _finalize_weekly_order(update: Update, context: ContextTypes.DEFAULT_T
     user_lines = [
         "<b>🎉 Спасибо! Заказ на неделю принят</b>",
         f"🔢 <b>Количество в день:</b> {count_int} {_ru_obed_plural(count_int)}",
-        f"🍽️ <b>Всего обедов:</b> {total_meals} {_ru_obед_plural(total_meals)}",
+        f"🍽️ <b>Всего обедов:</b> {total_meals} {_ru_obed_plural(total_meals)}",
         f"💸 <b>Сумма:</b> {total_cost} лари",
     ]
     if week_start_date:
@@ -3442,6 +3485,8 @@ if __name__ == "__main__":
         ],
         states={
             MENU: [
+                CallbackQueryHandler(show_menu, pattern=r"^start_show_menu$"),
+                CallbackQueryHandler(order_week_lunch, pattern=r"^start_weekly_order$"),
                 CallbackQueryHandler(change_order_callback, pattern=r"^change_order:"),
                 MessageHandler(filters.Regex("^Показать меню на неделю$"), show_menu),
                 MessageHandler(filters.Regex("^Показать заказы на эту неделю$"), admin_show_week_orders),
@@ -3460,6 +3505,7 @@ if __name__ == "__main__":
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
             ],
             ORDER_DAY: [
+                CallbackQueryHandler(order_week_lunch, pattern=r"^start_weekly_order$"),
                 MessageHandler(filters.Regex("^(Понедельник|Вторник|Среда|Четверг|Пятница)$"), select_day),
                 MessageHandler(filters.Regex("^Заказать на всю неделю$"), order_week_lunch),
                 MessageHandler(filters.Regex("^🔄 В начало$"), start),

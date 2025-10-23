@@ -50,7 +50,7 @@ def get_count_retry_keyboard():
     rows = [
         [KeyboardButton("1 обед"), KeyboardButton("2 обеда")],
         [KeyboardButton("3 обеда"), KeyboardButton("4 обеда")],
-        [KeyboardButton("Выбрать день заново")],
+        [KeyboardButton("Выбрать другой день")],
         [KeyboardButton("Назад")],
         [KeyboardButton("🔄 В начало"), KeyboardButton("❗ Связаться с человеком")],
     ]
