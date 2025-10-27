@@ -34,7 +34,6 @@ from keyboards import (
     get_day_keyboard,
     get_count_keyboard,
     get_count_retry_keyboard,
-    get_confirm_keyboard,
     get_contact_keyboard,
     get_address_keyboard,
     get_after_confirm_keyboard,
@@ -48,6 +47,8 @@ from keyboards import (
     get_admin_confirm_keyboard,
     get_admin_back_keyboard,
     get_bulk_counter_keyboard,
+    get_single_confirm_inline_keyboard,
+    get_weekly_confirm_inline_keyboard,
 )
 
 from datetime import datetime, timedelta, date
@@ -95,6 +96,9 @@ BULK_DAY_LABELS = {
 }
 BULK_LABEL_TO_CODE = {label: code for code, label in BULK_DAY_LABELS.items()}
 BULK_LABEL_TO_CODE_LOWER = {label.lower(): code for code, label in BULK_DAY_LABELS.items()}
+
+PHONE_ALLOWED_CHARS = set("0123456789+-() ")
+WEEKLY_START_BUTTON_LABEL = "❇️ Выбрать день заказа ❇️"
 
 # Состояния для ConversationHandler
 (
@@ -567,9 +571,10 @@ def get_bulk_order_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, dict]:
                 count_val = 0
             if count_val < 0:
                 count_val = 0
+            existing_selected = bool(info.get('selected'))
             info['label'] = label
             info['count'] = count_val
-            info['selected'] = bool(count_val > 0)
+            info['selected'] = existing_selected or bool(count_val > 0)
     context.user_data['bulk_order'] = ordered
     return ordered
 
@@ -612,6 +617,9 @@ def reset_bulk_order_state(
                     baseline[code] = count_val
 
     new_state: dict[str, dict] = {}
+    selected_codes = {
+        code for code in (_bulk_day_code(day_name) for day_name in days_list) if code
+    }
     for day_name in days_list:
         code = _bulk_day_code(day_name)
         if not code:
@@ -625,7 +633,7 @@ def reset_bulk_order_state(
         new_state[code] = {
             'label': label,
             'count': count,
-            'selected': bool(count > 0),
+            'selected': bool(count > 0 or code in selected_codes),
         }
 
     ordered: dict[str, dict] = {}
@@ -695,6 +703,37 @@ def _bulk_total_meals(counts_map: Mapping[str, int]) -> int:
     return total
 
 
+def _normalize_phone_input(text: str) -> str:
+    stripped = text.strip()
+    # Сжимаем множественные пробелы до одного
+    return " ".join(stripped.split())
+
+
+def _is_valid_phone_input(text: str) -> bool:
+    if not text:
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if not any(ch.isdigit() for ch in stripped):
+        return False
+    for ch in stripped:
+        if ch not in PHONE_ALLOWED_CHARS:
+            return False
+    return True
+
+
+def _post_order_followup_row() -> list[InlineKeyboardButton]:
+    return [
+        InlineKeyboardButton("Посмотреть меню", callback_data="start_show_menu"),
+        InlineKeyboardButton("Мои заказы", callback_data="post_my_orders"),
+    ]
+
+
+def _post_order_followup_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([_post_order_followup_row()])
+
+
 async def _bulk_start_quantity_selection(
     message,
     context: ContextTypes.DEFAULT_TYPE,
@@ -708,18 +747,11 @@ async def _bulk_start_quantity_selection(
     state = reset_bulk_order_state(context, selected_days, previous_draft)
     max_per_day = _bulk_max_per_day(context)
 
-    lines: list[str] = ["<b>Заказ на выбранные дни</b>"]
+    lines: list[str] = ["Используйте кнопки ниже, чтобы указать количество на каждый день."]
     if week_label:
-        lines.append(f"<i>Неделя:</i> {html.escape(week_label)}")
+        lines.insert(0, f"<i>Неделя:</i> {html.escape(week_label)}")
     if delivery_note:
-        lines.append(delivery_note)
-    summary = _build_weekly_menu_html(selected_days, weekly_menu, _bulk_selected_counts_map(context))
-    if summary:
-        lines.extend(["", summary])
-    lines.extend([
-        "",
-        "Используйте кнопки ниже, чтобы указать количество на каждый день.",
-    ])
+        lines.insert(0, delivery_note)
     if isinstance(max_per_day, int):
         lines.append(f"Максимум — {max_per_day} {_ru_obed_plural(max_per_day)} в день.")
 
@@ -732,23 +764,70 @@ async def _bulk_start_quantity_selection(
 
 
 async def _bulk_cancel_selection(query, context: ContextTypes.DEFAULT_TYPE) -> int:
+    restart_markup = InlineKeyboardMarkup(
+        [[InlineKeyboardButton(WEEKLY_START_BUTTON_LABEL, callback_data="start_weekly_order")]]
+    )
     try:
-        await query.edit_message_text("Выбор дней отменен.")
+        await query.edit_message_text(
+            "Выбор дней отменен.",
+            reply_markup=restart_markup,
+        )
     except BadRequest as exc:
         if "Message is not modified" not in str(exc):
             logging.debug(f"Не удалось обновить сообщение при отмене bulk: {exc}")
-    keyboard = get_main_menu_keyboard_admin() if query.from_user.id == ADMIN_ID else get_main_menu_keyboard()
-    await query.message.reply_text(
-        "Отменили оформление. Можете начать заново через меню.",
-        reply_markup=keyboard,
-    )
     _clear_weekly_context(context)
     context.user_data.pop('bulk_next_requested', None)
     context.user_data.pop('bulk_cancel_requested', None)
     return MENU
 
 
+async def _bulk_show_menu_preview(update: Update, context: ContextTypes.DEFAULT_TYPE, day_code: str) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    label = _bulk_day_label(day_code)
+    if not label:
+        await query.answer()
+        return
+    weekly_menu = context.user_data.get('weekly_menu') or {}
+    menu_items = weekly_menu.get(label) or []
+    if isinstance(menu_items, str):
+        menu_items = [menu_items]
+    menu_lines = [f"• {str(item).strip()}" for item in menu_items if str(item).strip()]
+    if not menu_lines:
+        menu_lines = ["• Меню не указано"]
+    preview_text = f"{label}\n" + "\n".join(menu_lines)
+    await query.answer(preview_text, show_alert=True)
+
+
 async def _bulk_handle_next(update: Update, query, context: ContextTypes.DEFAULT_TYPE) -> int:
+    state = get_bulk_order_state(context)
+    zero_selected: list[str] = []
+    for code in BULK_DAY_ORDER:
+        info = state.get(code)
+        if not isinstance(info, dict):
+            continue
+        if not info.get('selected'):
+            continue
+        try:
+            count_val = int(info.get('count', 0))
+        except Exception:
+            count_val = 0
+        if count_val <= 0:
+            label = str(info.get('label') or _bulk_day_label(code) or code)
+            zero_selected.append(label)
+
+    if zero_selected:
+        if len(zero_selected) == 1:
+            warning = f"Для дня {zero_selected[0]} выбрано 0 обедов. Укажите количество или уберите этот день."
+        else:
+            warning = (
+                "Для следующих дней выбрано 0 обедов: "
+                f"{', '.join(zero_selected)}. Укажите количество или уберите эти дни."
+            )
+        await query.answer(warning, show_alert=True)
+        return ORDER_COUNT
+
     entries = _bulk_selected_entries(context)
     if not entries:
         await query.answer("Выберите хотя бы один день и укажите количество.", show_alert=True)
@@ -796,6 +875,7 @@ async def _bulk_handle_next(update: Update, query, context: ContextTypes.DEFAULT
         )
 
     if duplicates:
+        await query.answer()
         context.user_data['weekly_duplicates'] = duplicates
         context.user_data['weekly_duplicate_days'] = [entry['day'] for entry in duplicates]
         lines = [
@@ -819,6 +899,7 @@ async def _bulk_handle_next(update: Update, query, context: ContextTypes.DEFAULT
         )
         return WEEKLY_DUPLICATE
 
+    await query.answer()
     context.user_data.pop('weekly_duplicates', None)
     context.user_data.pop('weekly_duplicate_days', None)
     return await _weekly_prepare_confirmation(update, context)
@@ -845,7 +926,6 @@ async def bulk_counter_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if action == "cancel":
         return await _bulk_cancel_selection(query, context)
     if action == "next":
-        await query.answer()
         return await _bulk_handle_next(update, query, context)
 
     state = get_bulk_order_state(context)
@@ -854,7 +934,14 @@ async def bulk_counter_callback(update: Update, context: ContextTypes.DEFAULT_TY
     show_alert = False
     max_per_day = _bulk_max_per_day(context)
 
-    if action in {"toggle", "inc", "dec"}:
+    if action == "viewmenu":
+        if target in state:
+            await _bulk_show_menu_preview(update, context, target)
+        else:
+            await query.answer()
+        return ORDER_COUNT
+
+    if action in {"inc", "dec"}:
         if target not in state:
             await query.answer()
             return ORDER_COUNT
@@ -867,18 +954,7 @@ async def bulk_counter_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if current < 0:
             current = 0
 
-        if action == "toggle":
-            if current > 0:
-                info['count'] = 0
-                info['selected'] = False
-            else:
-                new_val = 1
-                if isinstance(max_per_day, int):
-                    new_val = min(new_val, max_per_day)
-                info['count'] = new_val
-                info['selected'] = bool(new_val > 0)
-            state_changed = True
-        elif action == "inc":
+        if action == "inc":
             if isinstance(max_per_day, int) and current >= max_per_day:
                 response_text = f"Максимум {max_per_day} {_ru_obed_plural(max_per_day)} в день."
                 show_alert = True
@@ -887,7 +963,7 @@ async def bulk_counter_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 if isinstance(max_per_day, int):
                     new_val = min(new_val, max_per_day)
                 info['count'] = new_val
-                info['selected'] = bool(new_val > 0)
+                info['selected'] = info.get('selected', True) or new_val > 0
                 state_changed = True
         elif action == "dec":
             if current <= 0:
@@ -896,31 +972,60 @@ async def bulk_counter_callback(update: Update, context: ContextTypes.DEFAULT_TY
             else:
                 new_val = max(0, current - 1)
                 info['count'] = new_val
-                info['selected'] = bool(new_val > 0)
+                if not info.get('selected'):
+                    info['selected'] = True
                 state_changed = True
-    elif action == "all":
-        for code, info in state.items():
+    elif action == "decall":
+        changed = False
+        for info in state.values():
+            if not info.get('selected'):
+                continue
             try:
                 current = int(info.get('count', 0))
             except Exception:
                 current = 0
-            if current < 0:
+            if current <= 0:
+                continue
+            info['count'] = max(0, current - 1)
+            if not info.get('selected'):
+                info['selected'] = True
+            changed = True
+        if changed:
+            state_changed = True
+            response_text = "Уменьшили количество на всех днях."
+        else:
+            response_text = "Количество уже минимальное."
+            show_alert = True
+    elif action == "incall":
+        changed = False
+        blocked = False
+        for info in state.values():
+            if not info.get('selected'):
+                continue
+            try:
+                current = int(info.get('count', 0))
+            except Exception:
                 current = 0
-            new_val = current if current > 0 else 1
+            if isinstance(max_per_day, int) and current >= max_per_day:
+                blocked = True
+                continue
+            new_val = current + 1
             if isinstance(max_per_day, int):
                 new_val = min(new_val, max_per_day)
-            if info.get('count') != new_val or not info.get('selected'):
+            if new_val != current:
                 info['count'] = new_val
-                info['selected'] = bool(new_val > 0)
-                state_changed = True
-        response_text = "Выбраны все дни."
-    elif action == "none":
-        for info in state.values():
-            if info.get('count'):
-                info['count'] = 0
-                info['selected'] = False
-                state_changed = True
-        response_text = "Выбор очищен."
+                if not info.get('selected'):
+                    info['selected'] = True
+                changed = True
+        if changed:
+            state_changed = True
+            response_text = "Увеличили количество на всех днях."
+        else:
+            if blocked and isinstance(max_per_day, int):
+                response_text = f"Максимум {max_per_day} {_ru_obed_plural(max_per_day)} в день."
+            else:
+                response_text = "Нет выбранных дней для изменения."
+            show_alert = True
     else:
         await query.answer()
         return ORDER_COUNT
@@ -962,7 +1067,12 @@ def _current_week_start(now: datetime | None = None) -> date:
     return (now - timedelta(days=now.weekday())).date()
 
 
-def _build_order_actions_keyboard(order_id: str, allow_change: bool = True, allow_cancel: bool = True) -> InlineKeyboardMarkup | None:
+def _build_order_actions_keyboard(
+    order_id: str,
+    allow_change: bool = True,
+    allow_cancel: bool = True,
+    include_followup: bool = False,
+) -> InlineKeyboardMarkup | None:
     buttons: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
     if allow_change:
@@ -971,7 +1081,11 @@ def _build_order_actions_keyboard(order_id: str, allow_change: bool = True, allo
         row.append(InlineKeyboardButton("Отменить этот заказ", callback_data=f"cancel_order:{order_id}"))
     if row:
         buttons.append(row)
-    return InlineKeyboardMarkup(buttons) if buttons else None
+    if include_followup:
+        buttons.append(_post_order_followup_row())
+    if not buttons:
+        return InlineKeyboardMarkup([_post_order_followup_row()]) if include_followup else None
+    return InlineKeyboardMarkup(buttons)
 
 
 def _base36(n: int) -> str:
@@ -1584,47 +1698,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_user_registered(update.effective_user.id)
     log_console("Пользователь начал работу с ботом")
 
-    contacts = _prepare_operator_contacts()
-    contact_links: list[str] = []
-    if contacts["handle"]:
-        handle = contacts["handle"]
-        contact_links.append(
-            f"<a href=\"https://t.me/{html.escape(handle)}\">@{html.escape(handle)}</a>"
-        )
-    if contacts["phone_href"]:
-        phone_display = contacts["phone_display"] or contacts["phone_href"]
-        contact_links.append(
-            f"<a href=\"tel:{html.escape(contacts['phone_href'])}\">{html.escape(phone_display)}</a>"
-        )
-    if contacts["instagram_url"]:
-        contact_links.append(
-            f"<a href=\"{html.escape(contacts['instagram_url'])}\">{html.escape(contacts['instagram_label'])}</a>"
-        )
-    if contact_links:
-        contact_line = "• Связаться с оператором " + " / ".join(contact_links)
-    else:
-        contact_line = "• Связаться с оператором — контакты временно недоступны"
-
     greeting_caption = (
         "<b>Привет! Я Batumi Lunch Bot 👋</b>\n"
         "🥗 Домашние обеды с доставкой по Батуми\n"
-        "💸 15 лари за порцию, доставка бесплатная"
-    )
-    details_text = (
-        "Каждый обед: мясо 110 г • гарнир 300 г • салат 250 г\n"
-        "Готовим и привозим в будни с 12:30 до 15:30"
-    )
-    actions_text = (
-        "Готов помочь:\n"
-        "• Посмотреть меню недели\n"
-        "• Принять заказ\n"
-        f"{contact_line}\n\n"
-        "Выберите действие на клавиатуре ниже 👇"
+        "💸 15 лари за порцию, доставка бесплатная\n\n"
+        "Нажмите «Показать меню» или «О нас», чтобы продолжить."
     )
 
-    main_keyboard = get_main_menu_keyboard_admin() if is_admin else get_main_menu_keyboard()
     inline_start_markup = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("показать меню", callback_data="start_show_menu")]]
+        [[
+            InlineKeyboardButton("Показать меню", callback_data="start_show_menu"),
+            InlineKeyboardButton("О нас", callback_data="start_about"),
+        ]]
     )
 
     try:
@@ -1633,23 +1718,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 photo=logo,
                 caption=greeting_caption,
                 parse_mode=ParseMode.HTML,
+                reply_markup=inline_start_markup,
             )
     except FileNotFoundError:
         await update.message.reply_text(
             greeting_caption,
             parse_mode=ParseMode.HTML,
+            reply_markup=inline_start_markup,
         )
+    return MENU
 
-    await update.message.reply_text(
-        details_text,
+
+async def start_about(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query:
+        return MENU
+    await query.answer()
+    log_user_action(query.from_user, "start_about")
+    about_text = _build_about_text()
+    is_admin = query.from_user.id == ADMIN_ID
+    main_keyboard = get_main_menu_keyboard_admin() if is_admin else get_main_menu_keyboard()
+    await query.message.reply_text(
+        about_text,
         parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
         reply_markup=main_keyboard,
-    )
-
-    await update.message.reply_text(
-        actions_text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=inline_start_markup,
     )
     return MENU
 
@@ -1847,6 +1940,10 @@ def _ru_obed_plural(n: int) -> str:
 
 async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает заказы на текущую или следующую неделю в зависимости от статуса приёма."""
+    query = update.callback_query
+    if query:
+        await query.answer()
+    message = update.effective_message
     user = update.effective_user
     uid = user.id
 
@@ -1917,7 +2014,7 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not mine:
         msg = "У вас нет заказов на следующую неделю." if show_next_week else "У вас нет актуальных заказов на эту неделю."
-        await update.message.reply_text(msg)
+        await message.reply_text(msg)
         return MENU
 
     mine.sort(key=lambda x: (x.get("__didx", 99), x.get("__ts", 0)))
@@ -1964,7 +2061,13 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"<code>/order {html.escape(order_id)}</code>")
         lines.append("")
 
-    await update.message.reply_text("\n".join(lines).rstrip(), parse_mode=ParseMode.HTML)
+    await message.reply_text(
+        "\n".join(lines).rstrip(),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Показать меню", callback_data="start_show_menu")]]
+        ),
+    )
     return MENU
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2037,9 +2140,9 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_day_keyboard(),
     )
     await message.reply_text(
-        "Быстрый выбор:",
+        "▽▽▽▽▽Быстрый выбор:▽▽▽▽▽",
         reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Заказать на всю неделю", callback_data="start_weekly_order")]]
+            [[InlineKeyboardButton(WEEKLY_START_BUTTON_LABEL, callback_data="start_weekly_order")]]
         ),
     )
     return ORDER_DAY
@@ -2145,11 +2248,23 @@ async def order_week_lunch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _set_weekly_picker_state(context, picker_state)
 
     message_text = _weekly_picker_text(picker_state)
-    await message.reply_text(
-        message_text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=_weekly_picker_keyboard(picker_state),
-    )
+    markup = _weekly_picker_keyboard(picker_state)
+    if query:
+        try:
+            await query.edit_message_text(
+                message_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=markup,
+            )
+        except BadRequest as exc:
+            if 'Message is not modified' not in str(exc):
+                raise
+    else:
+        await message.reply_text(
+            message_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+        )
     return WEEKLY_DAY_PICK
 
 
@@ -2231,16 +2346,17 @@ async def weekly_picker_cancel(update: Update, context: ContextTypes.DEFAULT_TYP
     log_user_action(query.from_user, "weekly_picker_cancel")
     _clear_weekly_context(context)
     context.user_data.pop('weekly_picker_state', None)
+    restart_markup = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🍱 Выбрать день заказа", callback_data="start_weekly_order")]]
+    )
     try:
-        await query.edit_message_text("Пакетное оформление отменено.")
+        await query.edit_message_text(
+            "Пакетное оформление отменено.",
+            reply_markup=restart_markup,
+        )
     except BadRequest as exc:
         if 'Message is not modified' not in str(exc):
             raise
-    keyboard = get_main_menu_keyboard_admin() if query.from_user.id == ADMIN_ID else get_main_menu_keyboard()
-    await query.message.reply_text(
-        "Пакетное оформление отменено.",
-        reply_markup=keyboard,
-    )
     return MENU
 
 
@@ -2434,10 +2550,11 @@ async def _weekly_prepare_confirmation(update: Update, context: ContextTypes.DEF
         parts.append(f"<b>Телефон:</b> {html.escape(phone_line)}")
         parts.extend(["", "Все верно?"])
         confirm_text = "\n".join(parts)
+        confirm_markup = get_weekly_confirm_inline_keyboard()
         await message.reply_text(
             confirm_text,
             parse_mode=ParseMode.HTML,
-            reply_markup=get_confirm_keyboard(),
+            reply_markup=confirm_markup,
         )
         return CONFIRM
 
@@ -2685,10 +2802,16 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<b>Телефон:</b> {html.escape(phone_line)}\n\n"
             f"Все верно?{week_notice}"
         )
+        inline_markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Подтверждаю", callback_data="confirm_accept"),
+                InlineKeyboardButton("Назад", callback_data="confirm_back"),
+            ]
+        ])
         await update.message.reply_text(
             confirm_text,
             parse_mode=ParseMode.HTML,
-            reply_markup=get_confirm_keyboard(),
+            reply_markup=inline_markup,
         )
         return CONFIRM
 
@@ -2713,12 +2836,9 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ADDRESS
 
 # --- Разрешение ситуации с дублирующимся заказом на тот же день ---
-async def confirm_save_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.contact:
-        return CONFIRM
-    phone = update.message.contact.phone_number
+async def _process_phone_submission(update: Update, context: ContextTypes.DEFAULT_TYPE, phone_value: str) -> int:
     profile = context.user_data.get('profile') or {}
-    profile['phone'] = phone
+    profile['phone'] = phone_value
     context.user_data['profile'] = profile
     set_user_profile(update.effective_user.id, profile)
 
@@ -2753,12 +2873,24 @@ async def confirm_save_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(
         confirm_text,
         parse_mode=ParseMode.HTML,
-        reply_markup=get_confirm_keyboard(),
+        reply_markup=get_single_confirm_inline_keyboard(),
     )
     return CONFIRM
 
+
+async def confirm_save_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.contact:
+        return CONFIRM
+    phone = update.message.contact.phone_number
+    phone_clean = _normalize_phone_input(phone)
+    return await _process_phone_submission(update, context, phone_clean)
+
 async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    choice = (update.message.text or "").strip().lower()
+    raw_text = (update.message.text or "").strip()
+    if raw_text and _is_valid_phone_input(raw_text):
+        phone_clean = _normalize_phone_input(raw_text)
+        return await _process_phone_submission(update, context, phone_clean)
+    choice = raw_text.lower()
     profile = context.user_data.get('profile') or {}
 
     if choice == 'изменить адрес':
@@ -2791,11 +2923,20 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return ADDRESS
 
-    if choice != 'подтверждаю':
+    if choice == 'изменить телефон':
         await update.message.reply_text(
-            "Пожалуйста, выберите: <b>Подтверждаю</b> или <b>Изменить адрес</b>.",
+            "Отправьте новый номер телефона. Можно нажать кнопку ниже, чтобы поделиться контактом.",
             parse_mode=ParseMode.HTML,
-            reply_markup=get_confirm_keyboard(),
+            reply_markup=get_contact_keyboard(),
+        )
+        return CONFIRM
+
+    if choice != 'подтверждаю':
+        inline_markup = get_weekly_confirm_inline_keyboard() if context.user_data.get('weekly_mode') or context.user_data.get('pending_weekly_order') else get_single_confirm_inline_keyboard()
+        await update.message.reply_text(
+            "Пожалуйста, выберите: <b>Подтверждаю</b>, <b>Изменить адрес</b>, <b>Изменить телефон</b> или введите номер телефона.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=inline_markup,
         )
         return CONFIRM
 
@@ -2805,6 +2946,9 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _finalize_single_order(update: Update, context: ContextTypes.DEFAULT_TYPE, profile: dict) -> int:
+    message = update.effective_message
+    if not message:
+        return MENU
     pend = context.user_data.get('pending_order') or {}
     day = pend.get('day', context.user_data.get('selected_day', '(не выбран)'))
     count = pend.get('count', context.user_data.get('selected_count', '1'))
@@ -2815,7 +2959,7 @@ async def _finalize_single_order(update: Update, context: ContextTypes.DEFAULT_T
     except Exception:
         count_int = 1
     cost_lari = count_int * PRICE_LARI
-    user = update.message.from_user
+    user = update.effective_user or message.from_user
     username = f"@{user.username}" if user.username else "(нет username)"
     order_id = make_order_id(user.id)
     created_at = int(time.time())
@@ -2873,7 +3017,7 @@ async def _finalize_single_order(update: Update, context: ContextTypes.DEFAULT_T
     elif is_next_week_delivery:
         week_line = "\n🗓️ Доставка на следующей неделе."
 
-    await update.message.reply_text(
+    await message.reply_text(
         (
             f"<b>🎉 Спасибо! Заказ принят</b>\n\n"
             f"🧾 <b>ID заказа:</b> <code>{html.escape(order_id)}</code>\n"
@@ -2884,17 +3028,16 @@ async def _finalize_single_order(update: Update, context: ContextTypes.DEFAULT_T
             f"<b>🔎 Посмотреть детали позже:</b>\n"
             f"<code>/order {html.escape(order_id)}</code>"
         ),
-        reply_markup=_build_order_actions_keyboard(order_id),
+        reply_markup=_build_order_actions_keyboard(order_id, include_followup=True),
         parse_mode=ParseMode.HTML,
-    )
-    await update.message.reply_text(
-        "Что дальше?",
-        reply_markup=get_after_confirm_keyboard(),
     )
     return MENU
 
 
 async def _finalize_weekly_order(update: Update, context: ContextTypes.DEFAULT_TYPE, profile: dict) -> int:
+    message = update.effective_message
+    if not message:
+        return MENU
     pending = context.user_data.get('pending_weekly_order') or {}
     items_map = pending.get('items') if isinstance(pending.get('items'), Mapping) else None
     counts_map: dict[str, int] = {}
@@ -2939,7 +3082,7 @@ async def _finalize_weekly_order(update: Update, context: ContextTypes.DEFAULT_T
     total_meals = _bulk_total_meals({day: counts_map.get(day, 0) for day in days})
     total_cost = total_meals * PRICE_LARI
 
-    user = update.message.from_user
+    user = update.effective_user or message.from_user
     username = f"@{user.username}" if user.username else "(нет username)"
     created_at = int(time.time())
     created_orders: list[dict] = []
@@ -3018,9 +3161,11 @@ async def _finalize_weekly_order(update: Update, context: ContextTypes.DEFAULT_T
             user_lines.append(f"🗓️ Неделя начинается {week_start_date.strftime('%d.%m.%Y')}")
     user_lines.extend(["", "<b>Дни:</b>"])
     user_lines.extend(menu_blocks)
-    await update.message.reply_text("\n".join(user_lines), parse_mode=ParseMode.HTML)
-    await update.message.reply_text("Что дальше?", reply_markup=get_after_confirm_keyboard())
-
+    await message.reply_text(
+        "\n".join(user_lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=_post_order_followup_markup(),
+    )
     _clear_weekly_context(context)
     context.user_data.pop('selected_count', None)
     context.user_data.pop('order_for_next_week', None)
@@ -3032,36 +3177,38 @@ async def _finalize_weekly_order(update: Update, context: ContextTypes.DEFAULT_T
 
 # Назад с подтверждения к выбору количества
 async def back_to_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
     if context.user_data.get('weekly_mode'):
         selected_days = context.user_data.get('weekly_days') or []
         if not selected_days:
             keyboard = get_main_menu_keyboard_admin() if update.effective_user.id == ADMIN_ID else get_main_menu_keyboard()
-            await update.message.reply_text(
-                "Не удалось восстановить выбранные дни. Начнем с меню.",
-                reply_markup=keyboard,
-            )
+            if message:
+                await message.reply_text(
+                    "Не удалось восстановить выбранные дни. Начнем с меню.",
+                    reply_markup=keyboard,
+                )
             _clear_weekly_context(context)
             return MENU
         weekly_menu = context.user_data.get('weekly_menu') or {}
         week_label = str(context.user_data.get('weekly_week_label') or '')
         delivery_note = _weekly_delivery_hint(context)
-        await _bulk_start_quantity_selection(
-            update.message,
-            context,
-            selected_days=selected_days,
-            weekly_menu=weekly_menu,
-            week_label=week_label,
-            delivery_note=delivery_note,
-        )
+        if message:
+            await _bulk_start_quantity_selection(
+                message,
+                context,
+                selected_days=selected_days,
+                weekly_menu=weekly_menu,
+                week_label=week_label,
+                delivery_note=delivery_note,
+            )
         return ORDER_COUNT
-    await update.message.reply_text(
-        "<b>Сколько обедов заказать?</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=get_count_keyboard(),
-    )
+    if message:
+        await message.reply_text(
+            "<b>Сколько обедов заказать?</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_count_keyboard(),
+        )
     return ORDER_COUNT
-
-
 # Назад с выбора количества к выбору дня
 async def back_to_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('weekly_mode'):
@@ -3099,6 +3246,105 @@ async def confirm_request_phone(update: Update, context: ContextTypes.DEFAULT_TY
         "Нажмите кнопку ниже, чтобы отправить номер одним нажатием.",
         reply_markup=get_contact_keyboard(),
     )
+    return CONFIRM
+
+
+async def confirm_inline_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query or not query.data:
+        return CONFIRM
+    data = query.data
+    await query.answer()
+
+    if data == "weekly_confirm_accept":
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except BadRequest:
+            pass
+        profile = context.user_data.get('profile') or get_user_profile(query.from_user.id) or {}
+        if profile:
+            context.user_data['profile'] = profile
+        return await _finalize_weekly_order(update, context, profile)
+
+    if data == "weekly_confirm_back":
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except BadRequest:
+            pass
+        selected_days = context.user_data.get('weekly_days') or []
+        if not selected_days:
+            keyboard = get_main_menu_keyboard_admin() if query.from_user.id == ADMIN_ID else get_main_menu_keyboard()
+            await query.message.reply_text(
+                "Не удалось восстановить выбранные дни. Начнем с меню.",
+                reply_markup=keyboard,
+            )
+            _clear_weekly_context(context)
+            return MENU
+        weekly_menu = context.user_data.get('weekly_menu') or {}
+        week_label = str(context.user_data.get('weekly_week_label') or '')
+        delivery_note = _weekly_delivery_hint(context)
+        await _bulk_start_quantity_selection(
+            query.message,
+            context,
+            selected_days=selected_days,
+            weekly_menu=weekly_menu,
+            week_label=week_label,
+            delivery_note=delivery_note,
+        )
+        return ORDER_COUNT
+
+    if data == "weekly_confirm_edit_address":
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except BadRequest:
+            pass
+        hint = _weekly_delivery_hint(context)
+        lines = [
+            "<b>Введите новый адрес доставки</b>",
+            "",
+            "Напишите адрес одним сообщением:",
+            "• улица и дом",
+            "• подъезд/этаж/квартира",
+            "• ориентир для курьера",
+        ]
+        if hint:
+            lines.extend(["", hint])
+        await query.message.reply_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_address_keyboard(),
+        )
+        return ADDRESS
+
+    if data == "weekly_confirm_edit_phone":
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except BadRequest:
+            pass
+        await query.message.reply_text(
+            "Отправьте новый номер телефона. Можно нажать кнопку ниже, чтобы поделиться контактом.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_contact_keyboard(),
+        )
+        return CONFIRM
+
+    if data == "confirm_accept":
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except BadRequest:
+            pass
+        profile = context.user_data.get('profile') or get_user_profile(query.from_user.id) or {}
+        if profile:
+            context.user_data['profile'] = profile
+        return await _finalize_single_order(update, context, profile)
+
+    if data == "confirm_back":
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except BadRequest:
+            pass
+        return await back_to_count(update, context)
+
     return CONFIRM
 
 async def resolve_duplicate_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3163,7 +3409,7 @@ async def resolve_duplicate_order(update: Update, context: ContextTypes.DEFAULT_
             await update.message.reply_text(
                 confirm_text,
                 parse_mode=ParseMode.HTML,
-                reply_markup=get_confirm_keyboard(),
+                reply_markup=get_single_confirm_inline_keyboard(),
             )
             context.user_data.pop('duplicate_target', None)
             return CONFIRM
@@ -3377,10 +3623,12 @@ async def resolve_weekly_duplicates(update: Update, context: ContextTypes.DEFAUL
     if choice == "Отменить оформление":
         _clear_weekly_context(context)
         context.user_data.pop('selected_count', None)
-        main_keyboard = get_main_menu_keyboard_admin() if update.effective_user.id == ADMIN_ID else get_main_menu_keyboard()
+        restart_markup = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🍱 Выбрать день заказа", callback_data="start_weekly_order")]]
+    )
         await update.message.reply_text(
             "Пакетное оформление отменено.",
-            reply_markup=main_keyboard,
+            reply_markup=restart_markup,
         )
         return MENU
 
@@ -3442,7 +3690,7 @@ async def address_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             confirm_text,
             parse_mode=ParseMode.HTML,
-            reply_markup=get_confirm_keyboard(),
+            reply_markup=get_single_confirm_inline_keyboard(),
         )
         return CONFIRM
 
@@ -3483,10 +3731,16 @@ async def address_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"<b>Телефон:</b> {html.escape(phone_line)}\n\n"
                 f"Все верно?"
             )
+            inline_markup = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("Подтверждаю", callback_data="confirm_accept"),
+                    InlineKeyboardButton("Назад", callback_data="confirm_back"),
+                ]
+            ])
             await update.message.reply_text(
                 confirm_text,
                 parse_mode=ParseMode.HTML,
-                reply_markup=get_confirm_keyboard(),
+                reply_markup=inline_markup,
             )
             return CONFIRM
         else:
@@ -3640,9 +3894,16 @@ async def cancel_order_callback(update: Update, context: ContextTypes.DEFAULT_TY
             )
         except Exception:
             pass
+        restart_markup = InlineKeyboardMarkup(
+            [[
+                InlineKeyboardButton(WEEKLY_START_BUTTON_LABEL, callback_data="start_weekly_order"),
+                InlineKeyboardButton("Показать меню", callback_data="start_show_menu"),
+            ]]
+        )
         await query.edit_message_text(
             f"Заказ <code>{html.escape(order_id)}</code> отменен.",
             parse_mode=ParseMode.HTML,
+            reply_markup=restart_markup,
         )
 
 
@@ -3855,6 +4116,40 @@ def _prepare_operator_contacts() -> dict[str, str]:
     }
 
 
+def _build_about_text() -> str:
+    contacts = _prepare_operator_contacts()
+    contact_links: list[str] = []
+    if contacts["handle"]:
+        handle = contacts["handle"]
+        contact_links.append(
+            f"<a href=\"https://t.me/{html.escape(handle)}\">@{html.escape(handle)}</a>"
+        )
+    if contacts["phone_href"]:
+        phone_display = contacts["phone_display"] or contacts["phone_href"]
+        contact_links.append(
+            f"<a href=\"tel:{html.escape(contacts['phone_href'])}\">{html.escape(phone_display)}</a>"
+        )
+    if contacts["instagram_url"]:
+        contact_links.append(
+            f"<a href=\"{html.escape(contacts['instagram_url'])}\">{html.escape(contacts['instagram_label'])}</a>"
+        )
+    if contact_links:
+        contact_line = "• Связаться с оператором " + " / ".join(contact_links)
+    else:
+        contact_line = "• Связаться с оператором — контакты временно недоступны"
+
+    lines = [
+        "Каждый обед: мясо 110 г • гарнир 300 г • салат 250 г",
+        "Готовим и привозим в будни с 12:30 до 15:30",
+        "",
+        "Готов помочь:",
+        "• Посмотреть меню недели",
+        "• Принять заказ",
+        contact_line,
+    ]
+    return "\n".join(lines)
+
+
 # Handler for "Связаться с человеком" button
 async def contact_human(update: Update, context: ContextTypes.DEFAULT_TYPE):
     contacts = _prepare_operator_contacts()
@@ -3901,8 +4196,8 @@ def _build_fallback_hint(context: ContextTypes.DEFAULT_TYPE, is_admin: bool) -> 
         )
     if context.user_data.get('pending_weekly_order'):
         return (
-            "Мы на шаге <b>подтверждения пакетного заказа</b>. Используйте кнопки «Подтверждаю» или "
-            "«Изменить адрес», либо отправьте телефон."
+            "Мы на шаге <b>подтверждения пакетного заказа</b>. Используйте кнопки «Подтверждаю», "
+            "«Изменить адрес» или «Изменить телефон»."
         )
     if context.user_data.get('weekly_mode'):
         return (
@@ -3921,8 +4216,8 @@ def _build_fallback_hint(context: ContextTypes.DEFAULT_TYPE, is_admin: bool) -> 
         )
     if context.user_data.get('pending_order'):
         return (
-            "Мы на шаге <b>подтверждения заказа</b>. Используйте кнопки «Подтверждаю» или "
-            "«Изменить адрес», либо отправьте телефон."
+            "Мы на шаге <b>подтверждения заказа</b>. Используйте кнопки «Подтверждаю», "
+            "«Изменить адрес» или «Изменить телефон», либо отправьте телефон."
         )
     if context.user_data.get('selected_count'):
         return (
@@ -3968,6 +4263,7 @@ BUTTON_TEXTS = [
     "1 обед", "2 обеда", "3 обеда", "4 обеда",
     "Подтверждаю",
     "Изменить адрес",
+    "Изменить телефон",
     "Назад",
     "Отправить телефон",
     "🔄 В начало",
@@ -4060,6 +4356,8 @@ if __name__ == "__main__":
         states={
             MENU: [
                 CallbackQueryHandler(show_menu, pattern=r"^start_show_menu$"),
+                CallbackQueryHandler(start_about, pattern=r"^start_about$"),
+                CallbackQueryHandler(my_orders, pattern=r"^post_my_orders$"),
                 CallbackQueryHandler(order_week_lunch, pattern=r"^start_weekly_order$"),
                 CallbackQueryHandler(bulk_counter_callback, pattern=r"^bulk:"),
                 CallbackQueryHandler(change_order_callback, pattern=r"^change_order:"),
@@ -4081,6 +4379,8 @@ if __name__ == "__main__":
             ],
             ORDER_DAY: [
                 CallbackQueryHandler(order_week_lunch, pattern=r"^start_weekly_order$"),
+                CallbackQueryHandler(start_about, pattern=r"^start_about$"),
+                CallbackQueryHandler(my_orders, pattern=r"^post_my_orders$"),
                 CallbackQueryHandler(bulk_counter_callback, pattern=r"^bulk:"),
                 MessageHandler(filters.Regex("^(Понедельник|Вторник|Среда|Четверг|Пятница)$"), select_day),
                 MessageHandler(filters.Regex("^Заказать на всю неделю$"), order_week_lunch),
@@ -4090,6 +4390,8 @@ if __name__ == "__main__":
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
             ],
             WEEKLY_DAY_PICK: [
+                CallbackQueryHandler(start_about, pattern=r"^start_about$"),
+                CallbackQueryHandler(my_orders, pattern=r"^post_my_orders$"),
                 CallbackQueryHandler(weekly_picker_toggle, pattern=r"^weekly_toggle:\d+$"),
                 CallbackQueryHandler(weekly_picker_select_all, pattern=r"^weekly_all$"),
                 CallbackQueryHandler(weekly_picker_clear, pattern=r"^weekly_none$"),
@@ -4102,6 +4404,8 @@ if __name__ == "__main__":
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
             ],
             ORDER_COUNT: [
+                CallbackQueryHandler(start_about, pattern=r"^start_about$"),
+                CallbackQueryHandler(my_orders, pattern=r"^post_my_orders$"),
                 CallbackQueryHandler(bulk_counter_callback, pattern=r"^bulk:"),
                 CallbackQueryHandler(change_order_callback, pattern=r"^change_order:"),
                 MessageHandler(filters.Regex("^Назад$"), back_to_day),
@@ -4113,6 +4417,8 @@ if __name__ == "__main__":
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
             ],
             UPDATE_ORDER_COUNT: [
+                CallbackQueryHandler(start_about, pattern=r"^start_about$"),
+                CallbackQueryHandler(my_orders, pattern=r"^post_my_orders$"),
                 MessageHandler(filters.Regex("^Назад$"), cancel_update_order),
                 MessageHandler(filters.Regex("^(1 обед|2 обеда|3 обеда|4 обеда|[1-4])$"), update_order_count_choice),
                 MessageHandler(filters.Regex("^🔄 В начало$"), start),
@@ -4121,6 +4427,8 @@ if __name__ == "__main__":
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
             ],
             ADDRESS: [
+                CallbackQueryHandler(start_about, pattern=r"^start_about$"),
+                CallbackQueryHandler(my_orders, pattern=r"^post_my_orders$"),
                 MessageHandler(filters.Regex("^Назад$"), back_to_count),
                 MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
@@ -4129,9 +4437,12 @@ if __name__ == "__main__":
                 MessageHandler(filters.Regex("^В начало$"), start),
             ],
             CONFIRM: [
+                CallbackQueryHandler(confirm_inline_callback, pattern=r"^(weekly_confirm_(accept|back|edit_address|edit_phone|share_phone)|confirm_(accept|back|share_phone))$"),
+                CallbackQueryHandler(start_about, pattern=r"^start_about$"),
+                CallbackQueryHandler(my_orders, pattern=r"^post_my_orders$"),
                 MessageHandler(filters.Regex("^Назад$"), back_to_count),
                 MessageHandler(filters.CONTACT, confirm_save_phone),
-                MessageHandler(filters.Regex("^(Подтверждаю|Изменить адрес)$"), confirm_order),
+                MessageHandler(filters.Regex("^(Подтверждаю|Изменить адрес|Изменить телефон|Поделиться телефоном)$"), confirm_order),
                 MessageHandler(filters.Regex("^🔄 В начало$"), start),
                 MessageHandler(filters.Regex("^В начало$"), start),
                 MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),

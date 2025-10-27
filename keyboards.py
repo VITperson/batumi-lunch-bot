@@ -9,8 +9,7 @@ def add_start_button():
 def get_main_menu_keyboard():
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("Показать меню на неделю"), KeyboardButton("Заказать обед")],
-            [KeyboardButton("Заказать на всю неделю"), KeyboardButton("Мои заказы")],
+            [KeyboardButton("Мои заказы")],
             [KeyboardButton("🔄 В начало"), KeyboardButton("❗ Связаться с человеком")],
         ],
         resize_keyboard=True,
@@ -20,8 +19,7 @@ def get_main_menu_keyboard_admin():
     """Пользовательское меню для админа с кнопкой возврата в админский режим."""
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("Показать меню на неделю"), KeyboardButton("Заказать обед")],
-            [KeyboardButton("Заказать на всю неделю"), KeyboardButton("Мои заказы")],
+            [KeyboardButton("Мои заказы")],
             [KeyboardButton("Перейти в режим администратора")],
             [KeyboardButton("🔄 В начало"), KeyboardButton("❗ Связаться с человеком")],
         ],
@@ -30,9 +28,6 @@ def get_main_menu_keyboard_admin():
 
 def get_day_keyboard():
     rows = [
-        [KeyboardButton("Понедельник"), KeyboardButton("Вторник")],
-        [KeyboardButton("Среда"), KeyboardButton("Четверг")],
-        [KeyboardButton("Пятница")],
         [KeyboardButton("🔄 В начало"), KeyboardButton("❗ Связаться с человеком")],
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
@@ -55,17 +50,6 @@ def get_count_retry_keyboard():
         [KeyboardButton("🔄 В начало"), KeyboardButton("❗ Связаться с человеком")],
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
-
-def get_confirm_keyboard():
-    return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton("Подтверждаю"), KeyboardButton("Изменить адрес")],
-            [KeyboardButton("Отправить телефон", request_contact=True)],
-            [KeyboardButton("Назад")],
-            [KeyboardButton("🔄 В начало"), KeyboardButton("❗ Связаться с человеком")],
-        ],
-        resize_keyboard=True,
-    )
 
 def get_contact_keyboard():
     return ReplyKeyboardMarkup(
@@ -94,8 +78,7 @@ def get_order_prompt_keyboard():
 
 def get_after_confirm_keyboard():
     rows = [
-        [KeyboardButton("Посмотреть меню"), KeyboardButton("Выбрать еще один день")],
-        [KeyboardButton("Заказать на всю неделю"), KeyboardButton("Мои заказы")],
+        [KeyboardButton("Посмотреть меню"), KeyboardButton("Мои заказы")],
         [KeyboardButton("🔄 В начало"), KeyboardButton("❗ Связаться с человеком")],
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
@@ -179,12 +162,18 @@ def get_admin_back_keyboard():
 
 
 BULK_COUNTER_BUTTONS = {
-    "select_all": "Выбрать всё",
-    "clear_all": "Снять всё",
+    "decrement_all": "➖",
+    "increment_all": "➕",
     "continue": "Продолжить",
     "cancel": "Отмена",
 }
-BULK_COUNTER_BULLET = "•"
+BULK_DAY_SHORT_LABELS = {
+    "mon": "ПН",
+    "tue": "ВТ",
+    "wed": "СР",
+    "thu": "ЧТ",
+    "fri": "ПТ",
+}
 
 
 def get_bulk_counter_keyboard(state: dict[str, dict], max_per_day: int | None = None) -> InlineKeyboardMarkup:
@@ -195,26 +184,24 @@ def get_bulk_counter_keyboard(state: dict[str, dict], max_per_day: int | None = 
     rows: list[list[InlineKeyboardButton]] = []
     for day_code in ("mon", "tue", "wed", "thu", "fri"):
         day_info = state.get(day_code)
-        if not isinstance(day_info, dict):
+        if not isinstance(day_info, dict) or not day_info.get("selected"):
             continue
-        label = str(day_info.get("label") or "").strip() or day_code
+        full_label = str(day_info.get("label") or "").strip() or day_code
+        short_label = BULK_DAY_SHORT_LABELS.get(day_code, full_label)
         try:
             count = int(str(day_info.get("count", 0)).split()[0])
         except Exception:
             count = 0
         if count < 0:
             count = 0
-        day_text = label
-        if count > 0:
-            day_text = f"{label} {BULK_COUNTER_BULLET} {count}"
+        day_text = f"{short_label} {count}"
         minus_cb = f"bulk:dec:{day_code}"
         plus_cb = f"bulk:inc:{day_code}"
-        toggle_cb = f"bulk:toggle:{day_code}"
+        toggle_cb = f"bulk:viewmenu:{day_code}"
         rows.append([
+            InlineKeyboardButton(text="➖", callback_data=minus_cb),
             InlineKeyboardButton(text=day_text, callback_data=toggle_cb),
-            InlineKeyboardButton(text="-", callback_data=minus_cb),
-            InlineKeyboardButton(text=str(count), callback_data=toggle_cb),
-            InlineKeyboardButton(text="+", callback_data=plus_cb),
+            InlineKeyboardButton(text="➕", callback_data=plus_cb),
         ])
 
     if not rows:
@@ -225,12 +212,12 @@ def get_bulk_counter_keyboard(state: dict[str, dict], max_per_day: int | None = 
 
     rows.append([
         InlineKeyboardButton(
-            BULK_COUNTER_BUTTONS["select_all"],
-            callback_data="bulk:all:*",
+            BULK_COUNTER_BUTTONS["decrement_all"],
+            callback_data="bulk:decall:*",
         ),
         InlineKeyboardButton(
-            BULK_COUNTER_BUTTONS["clear_all"],
-            callback_data="bulk:none:*",
+            BULK_COUNTER_BUTTONS["increment_all"],
+            callback_data="bulk:incall:*",
         ),
     ])
     rows.append([
@@ -244,3 +231,27 @@ def get_bulk_counter_keyboard(state: dict[str, dict], max_per_day: int | None = 
         ),
     ])
     return InlineKeyboardMarkup(rows)
+
+
+def get_single_confirm_inline_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton("Подтверждаю", callback_data="confirm_accept"),
+            InlineKeyboardButton("Назад", callback_data="confirm_back"),
+        ]]
+    )
+
+
+def get_weekly_confirm_inline_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Подтверждаю", callback_data="weekly_confirm_accept"),
+                InlineKeyboardButton("Назад", callback_data="weekly_confirm_back"),
+            ],
+            [
+                InlineKeyboardButton("Изменить адрес", callback_data="weekly_confirm_edit_address"),
+                InlineKeyboardButton("Изменить телефон", callback_data="weekly_confirm_edit_phone"),
+            ],
+        ]
+    )
