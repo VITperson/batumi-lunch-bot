@@ -98,7 +98,7 @@ BULK_LABEL_TO_CODE = {label: code for code, label in BULK_DAY_LABELS.items()}
 BULK_LABEL_TO_CODE_LOWER = {label.lower(): code for code, label in BULK_DAY_LABELS.items()}
 
 PHONE_ALLOWED_CHARS = set("0123456789+-() ")
-WEEKLY_START_BUTTON_LABEL = "❇️ Выбрать день заказа ❇️"
+WEEKLY_START_BUTTON_LABEL = "🍱 Выбрать дни недели"
 
 # Состояния для ConversationHandler
 (
@@ -1738,11 +1738,14 @@ async def start_about(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     about_text = _build_about_text()
     is_admin = query.from_user.id == ADMIN_ID
     main_keyboard = get_main_menu_keyboard_admin() if is_admin else get_main_menu_keyboard()
+    inline_menu_keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Показать меню", callback_data="start_show_menu")]]
+    )
     await query.message.reply_text(
         about_text,
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
-        reply_markup=main_keyboard,
+        reply_markup=inline_menu_keyboard,
     )
     return MENU
 
@@ -2140,7 +2143,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_day_keyboard(),
     )
     await message.reply_text(
-        "▽▽▽▽▽Быстрый выбор:▽▽▽▽▽",
+        "⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton(WEEKLY_START_BUTTON_LABEL, callback_data="start_weekly_order")]]
         ),
@@ -2347,7 +2350,7 @@ async def weekly_picker_cancel(update: Update, context: ContextTypes.DEFAULT_TYP
     _clear_weekly_context(context)
     context.user_data.pop('weekly_picker_state', None)
     restart_markup = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🍱 Выбрать день заказа", callback_data="start_weekly_order")]]
+        [[InlineKeyboardButton(WEEKLY_START_BUTTON_LABEL, callback_data="start_weekly_order")]]
     )
     try:
         await query.edit_message_text(
@@ -2538,48 +2541,34 @@ async def _weekly_prepare_confirmation(update: Update, context: ContextTypes.DEF
     context.user_data['weekly_counts'] = counts_map
     context.user_data['pending_weekly_order'] = {'items': counts_map.copy()}
 
-    if profile and profile.get('address'):
-        phone_line = profile.get('phone') or "вы можете добавить телефон через кнопку ниже"
-        parts = ["<b>Подтвердите заказ на неделю</b>", ""]
-        parts.append(f"<b>Всего обедов:</b> {total_meals} {_ru_obed_plural(total_meals)}")
-        parts.append(f"<b>Сумма к оплате:</b> {total_cost} лари")
-        if delivery_hint:
-            parts.append(delivery_hint)
-        parts.extend(["", "<b>Дни и меню:</b>", menu_html, ""])
-        parts.append(f"<b>Адрес доставки:</b>\n{html.escape(profile.get('address') or '')}")
-        parts.append(f"<b>Телефон:</b> {html.escape(phone_line)}")
-        parts.extend(["", "Все верно?"])
-        confirm_text = "\n".join(parts)
-        confirm_markup = get_weekly_confirm_inline_keyboard()
-        await message.reply_text(
-            confirm_text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=confirm_markup,
-        )
-        return CONFIRM
+    profile = profile or {}
+    addr = profile.get('address')
+    phone_line = profile.get('phone')
+    addr_display = html.escape(addr) if addr else "<i>не указан</i>"
+    phone_display = html.escape(phone_line) if phone_line else "<i>не указан</i>"
 
-    address_parts = ["🎯 <b>Заказ почти готов</b>", ""]
-    address_parts.append(f"🍽️ <b>Всего обедов:</b> {total_meals} {_ru_obed_plural(total_meals)}")
-    address_parts.append(f"💸 <b>Сумма:</b> {total_cost} лари")
+    parts = ["<b>Подтвердите заказ на неделю</b>", ""]
+    parts.append(f"<b>Всего обедов:</b> {total_meals} {_ru_obed_plural(total_meals)}")
+    parts.append(f"<b>Сумма к оплате:</b> {total_cost} лари")
     if delivery_hint:
-        address_parts.append(delivery_hint)
-    address_parts.extend(["", "<b>Дни и меню:</b>", menu_html, ""])
-    address_parts.extend([
-        "📍 Остался 1 шаг — укажите <b>адрес доставки</b> одним сообщением:",
-        "• улица и дом",
-        "• подъезд/этаж/квартира",
-        "• ориентир для курьера",
-        "",
-        "✍️ <i>Пример:</i>",
-        "<code>ул. Руставели 10, подъезд 2, этаж 5, кв. 42; домофон 5423; ориентир — аптека</code>",
-    ])
-    address_text = "\n".join(address_parts)
+        parts.append(delivery_hint)
+    parts.extend(["", "<b>Дни и меню:</b>", menu_html, ""])
+    parts.append(f"<b>Адрес доставки:</b>\n{addr_display}")
+    parts.append(f"<b>Телефон:</b> {phone_display}")
+    if not addr or not phone_line:
+        parts.extend([
+            "",
+            "<i>После оформления мы попросим указать недостающие данные.</i>",
+        ])
+    parts.extend(["", "Все верно?"])
+    confirm_text = "\n".join(parts)
+    confirm_markup = get_weekly_confirm_inline_keyboard()
     await message.reply_text(
-        address_text,
+        confirm_text,
         parse_mode=ParseMode.HTML,
-        reply_markup=get_address_keyboard(),
+        reply_markup=confirm_markup,
     )
-    return ADDRESS
+    return CONFIRM
 
 # Обработка выбора дня недели
 async def select_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2773,67 +2762,53 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
         profile = get_user_profile(update.effective_user.id)
         if profile:
             context.user_data['profile'] = profile
-    has_address = bool((profile or {}).get('address'))
+    profile = profile or {}
 
-    if has_address:
-        context.user_data['pending_order'] = {
-            'day': day,
-            'count': count,
-            'menu': menu_for_day_text,
-        }
-        addr = profile.get('address')
-        phone_line = profile.get('phone') or "вы можете добавить телефон через кнопку ниже"
-        menu_lines_html = "\n".join(
-            f" - {html.escape(it.strip())}" for it in str(menu_for_day_text).split(',') if it.strip()
-        )
-        try:
-            count_int = int(str(count))
-        except Exception:
-            count_int = 1
-        cost_lari = count_int * PRICE_LARI
-        week_notice = "\n<i>Доставка будет на следующей неделе.</i>" if context.user_data.get('order_for_next_week') else ""
-        confirm_text = (
-            f"<b>Подтвердите заказ</b>\n\n"
-            f"<b>День:</b> {html.escape(day)}\n"
-            f"<b>Количество:</b> {html.escape(str(count))}\n"
-            f"<b>Меню:</b>\n{menu_lines_html}\n\n"
-            f"<b>Сумма к оплате:</b> {cost_lari} лари\n\n"
-            f"<b>Адрес доставки:</b>\n{html.escape(addr or '')}\n"
-            f"<b>Телефон:</b> {html.escape(phone_line)}\n\n"
-            f"Все верно?{week_notice}"
-        )
-        inline_markup = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("Подтверждаю", callback_data="confirm_accept"),
-                InlineKeyboardButton("Назад", callback_data="confirm_back"),
-            ]
-        ])
-        await update.message.reply_text(
-            confirm_text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=inline_markup,
-        )
-        return CONFIRM
+    context.user_data['pending_order'] = {
+        'day': day,
+        'count': count,
+        'menu': menu_for_day_text,
+    }
 
     menu_lines_html = "\n".join(
-        f"• {html.escape(it.strip())}" for it in str(menu_for_day_text).split(',') if it.strip()
+        f" - {html.escape(it.strip())}" for it in str(menu_for_day_text).split(',') if it.strip()
     )
+    try:
+        count_int = int(str(count))
+    except Exception:
+        count_int = 1
+    cost_lari = count_int * PRICE_LARI
     week_notice = "\n<i>Доставка будет на следующей неделе.</i>" if context.user_data.get('order_for_next_week') else ""
-    reply_text = (
-        f"🎯 <b>Заказ почти готов</b>\n\n"
-        f"📅 <b>{html.escape(day)}</b>\n"
-        f"🍽️ <b>Состав:</b>\n{menu_lines_html}\n"
-        f"🔢 <b>Количество:</b> {html.escape(str(count))}\n\n"
-        f"📍 Остался 1 шаг - укажите <b>адрес доставки</b> одним сообщением:\n"
-        f"• улица и дом\n"
-        f"• подъезд/этаж/квартира\n"
-        f"• ориентир для курьера\n\n"
-        f"✍️ <i>Пример:</i>\n"
-        f"<code>ул. Руставели 10, подъезд 2, этаж 5, кв. 42; домофон 5423; ориентир - аптека</code>\n\n"
-        f"После этого покажу итог и предложу подтвердить заказ ✅{week_notice}"
+
+    addr = profile.get('address')
+    phone_line = profile.get('phone')
+    addr_display = html.escape(addr) if addr else "<i>не указан</i>"
+    phone_display = html.escape(phone_line) if phone_line else "<i>не указан</i>"
+    note = ""
+    if not addr or not phone_line:
+        note = "\n\n<i>Недостающие данные мы уточним у вас после оформления заказа.</i>"
+
+    confirm_text = (
+        f"<b>Подтвердите заказ</b>\n\n"
+        f"<b>День:</b> {html.escape(day)}\n"
+        f"<b>Количество:</b> {html.escape(str(count))}\n"
+        f"<b>Меню:</b>\n{menu_lines_html}\n\n"
+        f"<b>Сумма к оплате:</b> {cost_lari} лари\n\n"
+        f"<b>Адрес доставки:</b>\n{addr_display}\n"
+        f"<b>Телефон:</b> {phone_display}{week_notice}{note}"
     )
-    await update.message.reply_text(reply_text, parse_mode=ParseMode.HTML, reply_markup=get_address_keyboard())
-    return ADDRESS
+    inline_markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Подтверждаю", callback_data="confirm_accept"),
+            InlineKeyboardButton("Назад", callback_data="confirm_back"),
+        ]
+    ])
+    await update.message.reply_text(
+        confirm_text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=inline_markup,
+    )
+    return CONFIRM
 
 # --- Разрешение ситуации с дублирующимся заказом на тот же день ---
 async def _process_phone_submission(update: Update, context: ContextTypes.DEFAULT_TYPE, phone_value: str) -> int:
@@ -2841,6 +2816,33 @@ async def _process_phone_submission(update: Update, context: ContextTypes.DEFAUL
     profile['phone'] = phone_value
     context.user_data['profile'] = profile
     set_user_profile(update.effective_user.id, profile)
+
+    collect = context.user_data.get('collect_after_order')
+    if collect:
+        collect['needs_phone'] = False
+        if not collect.get('needs_address') and not collect.get('needs_phone'):
+            context.user_data.pop('collect_after_order', None)
+            await update.message.reply_text(
+                "Спасибо! Контактный номер сохранен.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=_post_order_followup_markup(),
+            )
+            return MENU
+        await update.message.reply_text("<b>Телефон сохранен.</b>", parse_mode=ParseMode.HTML)
+        if collect.get('needs_address'):
+            await update.message.reply_text(
+                "📍 Теперь отправьте адрес доставки одним сообщением.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_address_keyboard(),
+            )
+            return ADDRESS
+        if collect.get('needs_phone'):
+            await update.message.reply_text(
+                "📞 Поделитесь номером телефона.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_contact_keyboard(),
+            )
+            return ADDRESS
 
     if context.user_data.get('weekly_mode'):
         return await _weekly_prepare_confirmation(update, context)
@@ -3031,6 +3033,30 @@ async def _finalize_single_order(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup=_build_order_actions_keyboard(order_id, include_followup=True),
         parse_mode=ParseMode.HTML,
     )
+
+    context.user_data.pop('pending_order', None)
+    addr_missing = not bool(profile.get('address'))
+    phone_missing = not bool(profile.get('phone'))
+    if addr_missing or phone_missing:
+        context.user_data['profile'] = profile
+        context.user_data['collect_after_order'] = {
+            'needs_address': addr_missing,
+            'needs_phone': phone_missing,
+            'final': True,
+        }
+        instructions: list[str] = ["Чтобы мы доставили заказ вовремя, поделитесь данными для доставки:"]
+        if addr_missing:
+            instructions.append("📍 Напишите адрес одним сообщением (улица, дом, ориентир).")
+        if phone_missing:
+            instructions.append("📞 Отправьте номер телефона или нажмите кнопку ниже, чтобы поделиться контактом.")
+        reply_markup = get_address_keyboard() if addr_missing else get_contact_keyboard()
+        await message.reply_text(
+            "\n\n".join(instructions),
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+        )
+        return ADDRESS
+
     return MENU
 
 
@@ -3166,12 +3192,36 @@ async def _finalize_weekly_order(update: Update, context: ContextTypes.DEFAULT_T
         parse_mode=ParseMode.HTML,
         reply_markup=_post_order_followup_markup(),
     )
+    addr_missing = not bool(profile.get('address'))
+    phone_missing = not bool(profile.get('phone'))
+
     _clear_weekly_context(context)
     context.user_data.pop('selected_count', None)
     context.user_data.pop('order_for_next_week', None)
     context.user_data.pop('order_week_start', None)
     context.user_data.pop('pending_weekly_order', None)
     context.user_data.pop('pending_order', None)
+
+    if addr_missing or phone_missing:
+        context.user_data['profile'] = profile
+        context.user_data['collect_after_order'] = {
+            'needs_address': addr_missing,
+            'needs_phone': phone_missing,
+            'final': True,
+        }
+        instructions: list[str] = ["Пожалуйста, поделитесь данными для доставки:"]
+        if addr_missing:
+            instructions.append("📍 Сейчас напишите адрес одним сообщением (улица, дом, ориентир).")
+        if phone_missing:
+            instructions.append("📞 Следующим шагом я попрошу вас поделиться номером телефона")
+        reply_markup = get_address_keyboard() if addr_missing else get_contact_keyboard()
+        await message.reply_text(
+            "\n\n".join(instructions),
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+        )
+        return ADDRESS
+
     return MENU
 
 
@@ -3538,6 +3588,7 @@ async def resolve_weekly_duplicates(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text(
             "Предыдущие заказы удалены. Продолжаем оформление нового недельного заказа.",
             parse_mode=ParseMode.HTML,
+            reply_markup=add_start_button(),
         )
         context.user_data['weekly_days_to_order'] = context.user_data.get('weekly_days') or []
         context.user_data.pop('weekly_duplicates', None)
@@ -3624,11 +3675,15 @@ async def resolve_weekly_duplicates(update: Update, context: ContextTypes.DEFAUL
         _clear_weekly_context(context)
         context.user_data.pop('selected_count', None)
         restart_markup = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🍱 Выбрать день заказа", callback_data="start_weekly_order")]]
-    )
+            [[InlineKeyboardButton(WEEKLY_START_BUTTON_LABEL, callback_data="start_weekly_order")]]
+        )
         await update.message.reply_text(
             "Пакетное оформление отменено.",
             reply_markup=restart_markup,
+        )
+        await update.message.reply_text(
+            "\u2060",
+            reply_markup=add_start_button(),
         )
         return MENU
 
@@ -3644,6 +3699,77 @@ async def address_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user = update.message.from_user
     profile = context.user_data.get('profile') or {}
+
+    collect = context.user_data.get('collect_after_order')
+    if collect:
+        handled = False
+        if update.message.contact:
+            phone = _normalize_phone_input(update.message.contact.phone_number)
+            profile['phone'] = phone
+            context.user_data['profile'] = profile
+            set_user_profile(user.id, profile)
+            collect['needs_phone'] = False
+            await update.message.reply_text("<b>Телефон сохранен.</b>", parse_mode=ParseMode.HTML)
+            handled = True
+        elif update.message.text:
+            text = update.message.text.strip()
+            if collect.get('needs_address'):
+                if not text:
+                    await update.message.reply_text(
+                        "Адрес пустой. Напишите адрес доставки одним сообщением.",
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=get_address_keyboard(),
+                    )
+                    return ADDRESS
+                profile['address'] = text
+                context.user_data['profile'] = profile
+                set_user_profile(user.id, profile)
+                collect['needs_address'] = False
+                await update.message.reply_text("<b>Адрес сохранен.</b>", parse_mode=ParseMode.HTML)
+                handled = True
+            elif collect.get('needs_phone'):
+                if not _is_valid_phone_input(text):
+                    await update.message.reply_text(
+                        "Введите номер телефона в формате +995... или поделитесь контактом кнопкой ниже.",
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=get_contact_keyboard(),
+                    )
+                    return ADDRESS
+                phone_clean = _normalize_phone_input(text)
+                profile['phone'] = phone_clean
+                context.user_data['profile'] = profile
+                set_user_profile(user.id, profile)
+                collect['needs_phone'] = False
+                await update.message.reply_text("<b>Телефон сохранен.</b>", parse_mode=ParseMode.HTML)
+                handled = True
+        if handled:
+            needs_address = collect.get('needs_address')
+            needs_phone = collect.get('needs_phone')
+            if not needs_address and not needs_phone:
+                context.user_data.pop('collect_after_order', None)
+                final = collect.get('final')
+                reply_markup = _post_order_followup_markup() if final else add_start_button()
+                await update.message.reply_text(
+                    "Спасибо! Данные для доставки сохранены.",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup,
+                )
+                return MENU
+            if needs_address:
+                await update.message.reply_text(
+                    "📍 Напишите адрес доставки одним сообщением.",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_address_keyboard(),
+                )
+                return ADDRESS
+            if needs_phone:
+                await update.message.reply_text(
+                    "📞 Отправьте номер телефона или поделитесь контактом кнопкой ниже.",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_contact_keyboard(),
+                )
+                return ADDRESS
+        return ADDRESS
 
     # Если пришел контакт - сохраняем телефон, но без адреса не продолжаем
     if update.message.contact:
