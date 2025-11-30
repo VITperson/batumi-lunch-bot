@@ -10,12 +10,14 @@ bot.log.*
 logs/
 bot_state.pickle
 orders.json
-order_window.json
+# order_window.json
 menu.jpg
-menu.jpeg
+# menu.jpeg
 .DS_Store
 agents.md
 !Agents.md
 DishPhotos/
 old menu/
 FutureIdeas.md
+InlineCountersPlan.md
+RELEASE_NOTES.md

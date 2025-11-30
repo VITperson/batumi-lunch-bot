@@ -19,8 +19,7 @@ def get_main_menu_keyboard_admin():
     """Пользовательское меню для админа с кнопкой возврата в админский режим."""
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("Мои заказы")],
-            [KeyboardButton("Перейти в режим администратора")],
+            [KeyboardButton("Мои заказы"), KeyboardButton("Перейти в режим администратора")],
             [KeyboardButton("🔄 В начало"), KeyboardButton("❗ Связаться с человеком")],
         ],
         resize_keyboard=True,
@@ -120,9 +119,9 @@ def get_admin_report_keyboard():
 
 def get_admin_manage_menu_keyboard():
     rows = [
-        [KeyboardButton("Изменить название недели"), KeyboardButton("Редактировать блюда дня")],
-        [KeyboardButton("Обновить фото меню"), KeyboardButton("Открыть заказы на следующую неделю")],
-        [KeyboardButton("Назад"), KeyboardButton("🔄 В начало")],
+        [KeyboardButton("Загрузить фото меню (AI)")],
+        [KeyboardButton("Назад")],
+        [KeyboardButton("🔄 В начало")],
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 

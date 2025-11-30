@@ -27,6 +27,7 @@ import secrets
 from urllib.parse import urlparse
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters, ConversationHandler, PicklePersistence
+import openai
 from keyboards import (
     add_start_button,
     get_main_menu_keyboard,
@@ -118,7 +119,8 @@ WEEKLY_START_BUTTON_LABEL = "🍱 Выбрать дни недели"
     ADMIN_MENU_ITEM_TEXT,
     ADMIN_MENU_WEEK,
     ADMIN_MENU_PHOTO,
-) = range(16)
+    ADMIN_MENU_UPLOAD_PHOTO,
+) = range(17)
 
 # Настройка логирования с TimedRotatingFileHandler
 logger = logging.getLogger()
@@ -180,6 +182,23 @@ def load_menu():
             if not isinstance(data, dict) or "week" not in data or "menu" not in data or not isinstance(data["menu"], dict):
                 logging.error("Меню имеет неверный формат: ожидались ключи 'week' и 'menu' (dict)")
                 return None
+            # Normalization of day keys
+            menu_block = data.get("menu", {})
+            normalized_menu = {}
+            
+            SHORT_TO_FULL = {
+                "ПН": "Понедельник", "ВТ": "Вторник", "СР": "Среда", "ЧТ": "Четверг", "ПТ": "Пятница",
+                "MON": "Понедельник", "TUE": "Вторник", "WED": "Среда", "THU": "Четверг", "FRI": "Пятница",
+            }
+            
+            for key, value in menu_block.items():
+                upper_key = key.upper().strip()
+                if upper_key in SHORT_TO_FULL:
+                    normalized_menu[SHORT_TO_FULL[upper_key]] = value
+                else:
+                    normalized_menu[key] = value
+            
+            data["menu"] = normalized_menu
             return data
     except Exception as e:
         logging.error(f"Ошибка загрузки меню: {e}")
@@ -1660,7 +1679,7 @@ async def admin_menu_exit(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(update.message.from_user, "start")
     # Сброс состояния и user_data
-    # Сохраним флаг режима админа, если был
+    # Сохраняем предпочтение режима админа, если оно было установлено
     prev_admin_ui = context.user_data.get('admin_ui', True)
     context.user_data.clear()
     context.user_data['admin_ui'] = prev_admin_ui
@@ -1711,6 +1730,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("О нас", callback_data="start_about"),
         ]]
     )
+    
+    # Определяем клавиатуру: для админа в режиме пользователя показываем специальную клавиатуру
+    keyboard = get_main_menu_keyboard_admin() if is_admin else None
 
     try:
         with open("Logo.png", "rb") as logo:
@@ -1726,6 +1748,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML,
             reply_markup=inline_start_markup,
         )
+    
+    # Отправляем клавиатуру отдельным сообщением, если это админ в режиме пользователя
+    if is_admin and keyboard:
+        await update.message.reply_text(
+            "Выберите действие:",
+            reply_markup=keyboard,
+        )
+    
     return MENU
 
 
@@ -3058,6 +3088,187 @@ async def _finalize_single_order(update: Update, context: ContextTypes.DEFAULT_T
         return ADDRESS
 
     return MENU
+
+
+async def ask_menu_photo_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text(
+        "📸 Пожалуйста, отправьте фото нового меню.\n"
+        "Я попробую распознать текст и обновить меню автоматически.",
+        reply_markup=get_admin_back_keyboard(),
+    )
+    return ADMIN_MENU_UPLOAD_PHOTO
+
+
+async def handle_menu_photo_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    message = update.effective_message
+    if not message.photo:
+        await message.reply_text("Это не фото. Пожалуйста, отправьте изображение или нажмите Назад.")
+        return ADMIN_MENU_UPLOAD_PHOTO
+
+    # Получаем файл с самым высоким разрешением
+    photo_file = await message.photo[-1].get_file()
+    
+    # Скачиваем файл
+    file_path = "menu_new_temp.jpg"
+    await photo_file.download_to_drive(file_path)
+
+    await message.reply_text("Фото получено. Обрабатываю через AI... ⏳")
+
+    try:
+        import base64
+        
+        # Function to encode the image
+        def encode_image(image_path):
+            with open(image_path, "rb") as image_file:
+                return base64.b64encode(image_file.read()).decode('utf-8')
+
+        base64_image = encode_image(file_path)
+        
+        from config_secret import OPENAI_API_KEY
+        client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant that extracts menu data from images. Return ONLY valid JSON."
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Extract the weekly menu from this image. Return a JSON object with keys: 'week' (string, e.g. '24-28 ноября') and 'menu' (object where keys are days like 'Понедельник', 'Вторник' etc., and values are lists of strings for dishes). Also extract the start date of the week if possible to calculate next week start."},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            response_format={ "type": "json_object" }
+        )
+        
+        result_text = response.choices[0].message.content
+        menu_data = json.loads(result_text)
+        
+        # Basic validation
+        if "menu" not in menu_data:
+             raise ValueError("JSON does not contain 'menu' key")
+
+        # 1. Update menu.json
+        save_menu(menu_data)
+
+        # 2. Update order_window.json
+        # Пытаемся определить дату начала недели из строки 'week' или текущей даты
+        # Логика: если сегодня суббота/воскресенье, то меню скорее всего на следующую неделю.
+        # Но пользователь сказал "Сегодня суббота и на следующую неделю уже готово новое меню"
+        # Значит, мы обновляем order_window на следующую неделю.
+        
+        now = datetime.now()
+        # Если сегодня суббота (5) или воскресенье (6), то next_week_start - это следующий понедельник
+        days_ahead = (7 - now.weekday()) % 7
+        if days_ahead == 0: days_ahead = 7
+        next_monday = (now + timedelta(days=days_ahead)).date()
+        
+        # Обновляем order_window
+        _set_next_week_orders(True, next_monday)
+
+        # 3. Картинка меню сохраняется и заменяет уже имеющуюся
+        # Сначала архивируем старую
+        old_menu_path = "menu.jpeg"
+        if os.path.exists(old_menu_path):
+            os.makedirs("old menus", exist_ok=True)
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            os.rename(old_menu_path, os.path.join("old menus", f"menu_{timestamp}.jpeg"))
+        
+        # Переименовываем новую
+        os.rename(file_path, "menu.jpeg")
+
+        # Клавиатура для рассылки
+        broadcast_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📢 Разослать уведомление", callback_data="broadcast_menu_update")]
+        ])
+
+        await message.reply_text(
+            f"✅ Меню успешно обновлено!\n\n"
+            f"<b>Неделя:</b> {menu_data.get('week')}\n"
+            f"<b>Прием заказов:</b> открыт на неделю с {next_monday}\n"
+            f"<b>Фото:</b> обновлено",
+            parse_mode=ParseMode.HTML,
+            reply_markup=broadcast_keyboard
+        )
+        
+        # Возвращаем клавиатуру админа отдельным сообщением
+        await message.reply_text(
+            "Что делаем дальше?",
+            reply_markup=get_admin_manage_menu_keyboard()
+        )
+        return ADMIN_MENU
+
+    except Exception as e:
+        logging.error(f"AI Error: {e}")
+        await message.reply_text(f"❌ Ошибка обработки: {e}", reply_markup=get_admin_manage_menu_keyboard())
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        return ADMIN_MENU
+
+
+async def broadcast_menu_update_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.from_user.id != ADMIN_ID:
+        await query.answer("Только для админа", show_alert=True)
+        return
+
+    menu_data = _get_current_menu()
+    week_text = html.escape(menu_data.get('week', ''))
+    
+    announcement = (
+        f"📢 <b>Новое меню готово!</b>\n\n"
+        f"Мы обновили меню на неделю <b>{week_text}</b>.\n"
+        f"Заходите в бот, чтобы посмотреть вкусные новинки и сделать заказ!"
+    )
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Посмотреть меню", callback_data="start_show_menu")]
+    ])
+    
+    users = _load_users()
+    count = 0
+    blocked = 0
+    
+    status_msg = await query.message.reply_text("Начинаю рассылку... ⏳")
+    
+    # Remove the button to prevent double clicks
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    for user_id in users:
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=announcement,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard
+            )
+            count += 1
+            await asyncio.sleep(0.05)
+        except Forbidden:
+            blocked += 1
+        except Exception as e:
+            logging.error(f"Failed to send to {user_id}: {e}")
+            
+    await status_msg.edit_text(
+        f"✅ Рассылка завершена.\n"
+        f"Отправлено: {count}\n"
+        f"Заблокировали бота: {blocked}"
+    )
+    return ADMIN_MENU
 
 
 async def _finalize_weekly_order(update: Update, context: ContextTypes.DEFAULT_TYPE, profile: dict) -> int:
@@ -4477,7 +4688,8 @@ if __name__ == "__main__":
         persistent=True,
         entry_points=[
             CommandHandler("start", start),
-            MessageHandler(filters.Regex("^🔄 В начало$"), start)
+            MessageHandler(filters.Regex("^🔄 В начало$"), start),
+            CallbackQueryHandler(show_menu, pattern=r"^start_show_menu$"),
         ],
         states={
             MENU: [
@@ -4504,6 +4716,7 @@ if __name__ == "__main__":
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
             ],
             ORDER_DAY: [
+                CallbackQueryHandler(show_menu, pattern=r"^start_show_menu$"),
                 CallbackQueryHandler(order_week_lunch, pattern=r"^start_weekly_order$"),
                 CallbackQueryHandler(start_about, pattern=r"^start_about$"),
                 CallbackQueryHandler(my_orders, pattern=r"^post_my_orders$"),
@@ -4516,6 +4729,7 @@ if __name__ == "__main__":
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
             ],
             WEEKLY_DAY_PICK: [
+                CallbackQueryHandler(show_menu, pattern=r"^start_show_menu$"),
                 CallbackQueryHandler(start_about, pattern=r"^start_about$"),
                 CallbackQueryHandler(my_orders, pattern=r"^post_my_orders$"),
                 CallbackQueryHandler(weekly_picker_toggle, pattern=r"^weekly_toggle:\d+$"),
@@ -4530,6 +4744,7 @@ if __name__ == "__main__":
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
             ],
             ORDER_COUNT: [
+                CallbackQueryHandler(show_menu, pattern=r"^start_show_menu$"),
                 CallbackQueryHandler(start_about, pattern=r"^start_about$"),
                 CallbackQueryHandler(my_orders, pattern=r"^post_my_orders$"),
                 CallbackQueryHandler(bulk_counter_callback, pattern=r"^bulk:"),
@@ -4543,6 +4758,7 @@ if __name__ == "__main__":
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
             ],
             UPDATE_ORDER_COUNT: [
+                CallbackQueryHandler(show_menu, pattern=r"^start_show_menu$"),
                 CallbackQueryHandler(start_about, pattern=r"^start_about$"),
                 CallbackQueryHandler(my_orders, pattern=r"^post_my_orders$"),
                 MessageHandler(filters.Regex("^Назад$"), cancel_update_order),
@@ -4553,6 +4769,7 @@ if __name__ == "__main__":
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
             ],
             ADDRESS: [
+                CallbackQueryHandler(show_menu, pattern=r"^start_show_menu$"),
                 CallbackQueryHandler(start_about, pattern=r"^start_about$"),
                 CallbackQueryHandler(my_orders, pattern=r"^post_my_orders$"),
                 MessageHandler(filters.Regex("^Назад$"), back_to_count),
@@ -4563,6 +4780,7 @@ if __name__ == "__main__":
                 MessageHandler(filters.Regex("^В начало$"), start),
             ],
             CONFIRM: [
+                CallbackQueryHandler(show_menu, pattern=r"^start_show_menu$"),
                 CallbackQueryHandler(confirm_inline_callback, pattern=r"^(weekly_confirm_(accept|back|edit_address|edit_phone|share_phone)|confirm_(accept|back|share_phone))$"),
                 CallbackQueryHandler(start_about, pattern=r"^start_about$"),
                 CallbackQueryHandler(my_orders, pattern=r"^post_my_orders$"),
@@ -4576,6 +4794,7 @@ if __name__ == "__main__":
                 MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_order),
             ],
             DUPLICATE: [
+                CallbackQueryHandler(show_menu, pattern=r"^start_show_menu$"),
                 MessageHandler(filters.Regex("^Удалить предыдущий заказ$"), resolve_duplicate_order),
                 MessageHandler(filters.Regex("^Добавить к существующему$"), resolve_duplicate_order),
                 MessageHandler(filters.Regex("^🔄 В начало$"), start),
@@ -4594,10 +4813,12 @@ if __name__ == "__main__":
             ],
             
             ADMIN_MENU: [
-                MessageHandler(filters.Regex("^Изменить название недели$"), admin_menu_request_week),
-                MessageHandler(filters.Regex("^Редактировать блюда дня$"), admin_menu_show_day_prompt),
-                MessageHandler(filters.Regex("^Обновить фото меню$"), admin_menu_request_photo),
-                MessageHandler(filters.Regex("^Открыть заказы на следующую неделю$"), admin_open_next_week_orders),
+                # MessageHandler(filters.Regex("^Изменить название недели$"), admin_menu_request_week),
+                # MessageHandler(filters.Regex("^Редактировать блюда дня$"), admin_menu_show_day_prompt),
+                # MessageHandler(filters.Regex("^Обновить фото меню$"), admin_menu_request_photo),
+                MessageHandler(filters.Regex(r"^Загрузить фото меню \(AI\)$"), ask_menu_photo_ai),
+                CallbackQueryHandler(broadcast_menu_update_callback, pattern="^broadcast_menu_update$"),
+                # MessageHandler(filters.Regex("^Открыть заказы на следующую неделю$"), admin_open_next_week_orders),
                 MessageHandler(filters.Regex("^Назад$"), admin_menu_exit),
                 MessageHandler(filters.Regex("^🔄 В начало$"), start),
                 MessageHandler(filters.Regex("^В начало$"), start),
@@ -4655,6 +4876,15 @@ if __name__ == "__main__":
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
                 MessageHandler((filters.PHOTO | filters.Document.IMAGE), admin_menu_handle_photo),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, admin_menu_handle_photo),
+            ],
+            ADMIN_MENU_UPLOAD_PHOTO: [
+                MessageHandler(filters.Regex("^Назад$"), admin_manage_menu),
+                MessageHandler(filters.Regex("^🔄 В начало$"), start),
+                MessageHandler(filters.Regex("^В начало$"), start),
+                MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
+                MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
+                MessageHandler((filters.PHOTO | filters.Document.IMAGE), handle_menu_photo_ai),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_photo_ai),
             ],
         },
         fallbacks=[CommandHandler("start", start), MessageHandler(filters.ALL, fallback)]

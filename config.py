@@ -15,6 +15,7 @@ WELCOME_CAPTION = (
     "Вы можете:\n• Посмотреть меню на неделю\n• Сразу оформить заказ\n\nВыберите одну из опций ниже:"
 )
 
+
 # Контакты по умолчанию, могут быть переопределены в config_secret.py
-# OPERATOR_HANDLE_DEFAULT = "@vitperson"
+OPERATOR_HANDLE_DEFAULT = "@vitperson"
 # OPERATOR_PHONE_DEFAULT = "+995 000 000 000"
