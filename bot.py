@@ -3,6 +3,42 @@
 
 
 from config_secret import BOT_TOKEN, ADMIN_ID
+try:
+    from config_secret import ADMIN_IDS as CONFIG_ADMIN_IDS
+except Exception:
+    CONFIG_ADMIN_IDS = None
+
+
+def _normalize_admin_ids(primary_id, extra_ids) -> set[int]:
+    ids: set[int] = set()
+    try:
+        ids.add(int(primary_id))
+    except Exception:
+        pass
+    if extra_ids is not None:
+        try:
+            if isinstance(extra_ids, (list, tuple, set)):
+                ids.update(int(x) for x in extra_ids)
+            else:
+                ids.add(int(extra_ids))
+        except Exception:
+            pass
+    if not ids:
+        try:
+            ids.add(int(primary_id))
+        except Exception:
+            pass
+    return ids
+
+
+ADMIN_IDS = _normalize_admin_ids(ADMIN_ID, CONFIG_ADMIN_IDS)
+
+
+def is_admin_id(user_id: int | None) -> bool:
+    try:
+        return int(user_id) in ADMIN_IDS
+    except Exception:
+        return False
 
 # Дополнительные контакты оператора (опционально из config_secret)
 try:
@@ -101,6 +137,9 @@ BULK_LABEL_TO_CODE_LOWER = {label.lower(): code for code, label in BULK_DAY_LABE
 PHONE_ALLOWED_CHARS = set("0123456789+-() ")
 WEEKLY_START_BUTTON_LABEL = "🍱 Выбрать дни недели"
 
+def main_menu_keyboard_for(user_id: int):
+    return get_main_menu_keyboard_admin() if is_admin_id(user_id) else get_main_menu_keyboard()
+
 # Состояния для ConversationHandler
 (
     MENU,
@@ -157,6 +196,15 @@ logger.addHandler(console_handler)
 def log_console(message):
     console_handler.stream.write(message + "\n")
     console_handler.flush()
+
+
+async def notify_admins(bot, text: str, **kwargs):
+    """Send a message to all configured admins."""
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(chat_id=admin_id, text=text, **kwargs)
+        except Exception as exc:
+            logging.error(f"Ошибка отправки админу {admin_id}: {exc}")
 
 async def send_success_gif(update: Update) -> None:
     """Sends celebration animation when available, otherwise keeps silent."""
@@ -1232,7 +1280,7 @@ def get_broadcast_recipients() -> list[int]:
     except Exception:
         pass
     try:
-        uids.discard(int(ADMIN_ID))
+        uids.difference_update(ADMIN_IDS)
     except Exception:
         pass
     return sorted(uids)
@@ -1276,7 +1324,7 @@ def admin_link_html(user) -> str:
 
 async def admin_manage_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if user.id != ADMIN_ID:
+    if not is_admin_id(user.id):
         await update.message.reply_text("Недоступно.")
         return MENU
 
@@ -1300,7 +1348,7 @@ async def admin_manage_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_menu_show_day_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if user.id != ADMIN_ID:
+    if not is_admin_id(user.id):
         await update.message.reply_text("Недоступно.")
         return MENU
     menu_data = _get_current_menu()
@@ -1320,7 +1368,7 @@ async def admin_menu_show_day_prompt(update: Update, context: ContextTypes.DEFAU
 
 async def admin_menu_day_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if user.id != ADMIN_ID:
+    if not is_admin_id(user.id):
         await update.message.reply_text("Недоступно.")
         return MENU
     day = (update.message.text or "").strip()
@@ -1352,7 +1400,7 @@ async def admin_menu_day_chosen(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def admin_menu_request_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if user.id != ADMIN_ID:
+    if not is_admin_id(user.id):
         await update.message.reply_text("Недоступно.")
         return MENU
     await update.message.reply_text(
@@ -1364,7 +1412,7 @@ async def admin_menu_request_photo(update: Update, context: ContextTypes.DEFAULT
 
 async def admin_menu_request_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if user.id != ADMIN_ID:
+    if not is_admin_id(user.id):
         await update.message.reply_text("Недоступно.")
         return MENU
     current_week = str((_get_current_menu()).get('week') or "")
@@ -1380,7 +1428,7 @@ async def admin_menu_request_week(update: Update, context: ContextTypes.DEFAULT_
 
 async def admin_open_next_week_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if user.id != ADMIN_ID:
+    if not is_admin_id(user.id):
         await update.message.reply_text("Недоступно.")
         return MENU
 
@@ -1470,7 +1518,7 @@ async def admin_menu_day_action_replace(update: Update, context: ContextTypes.DE
 
 async def admin_menu_handle_item_index(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if user.id != ADMIN_ID:
+    if not is_admin_id(user.id):
         await update.message.reply_text("Недоступно.")
         return MENU
     action = context.user_data.get('admin_menu_action')
@@ -1518,7 +1566,7 @@ async def admin_menu_handle_item_index(update: Update, context: ContextTypes.DEF
 
 async def admin_menu_handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if user.id != ADMIN_ID:
+    if not is_admin_id(user.id):
         await update.message.reply_text("Недоступно.")
         return MENU
     action = context.user_data.get('admin_menu_action')
@@ -1596,7 +1644,7 @@ async def admin_menu_save_week(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def admin_menu_handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if user.id != ADMIN_ID:
+    if not is_admin_id(user.id):
         await update.message.reply_text("Недоступно.")
         return MENU
     file_id = None
@@ -1665,7 +1713,7 @@ async def admin_menu_back_to_day_select(update: Update, context: ContextTypes.DE
 
 async def admin_menu_exit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if user.id != ADMIN_ID:
+    if not is_admin_id(user.id):
         await update.message.reply_text("Недоступно.")
         return MENU
     await update.message.reply_text(
@@ -1683,7 +1731,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prev_admin_ui = context.user_data.get('admin_ui', True)
     context.user_data.clear()
     context.user_data['admin_ui'] = prev_admin_ui
-    is_admin = update.effective_user.id == ADMIN_ID
+    is_admin = is_admin_id(update.effective_user.id)
     admin_ui = context.user_data.get('admin_ui', True)
     if is_admin and admin_ui:
         admin_caption = (
@@ -1766,7 +1814,7 @@ async def start_about(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     await query.answer()
     log_user_action(query.from_user, "start_about")
     about_text = _build_about_text()
-    is_admin = query.from_user.id == ADMIN_ID
+    is_admin = is_admin_id(query.from_user.id)
     main_keyboard = get_main_menu_keyboard_admin() if is_admin else get_main_menu_keyboard()
     inline_menu_keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("Показать меню", callback_data="start_show_menu")]]
@@ -1782,7 +1830,7 @@ async def start_about(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
 async def admin_show_week_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if user.id != ADMIN_ID:
+    if not is_admin_id(user.id):
         await update.message.reply_text("Недоступно.")
         return MENU
 
@@ -1796,7 +1844,7 @@ async def admin_show_week_orders(update: Update, context: ContextTypes.DEFAULT_T
 
 async def admin_report_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if user.id != ADMIN_ID:
+    if not is_admin_id(user.id):
         await update.message.reply_text("Недоступно.")
         return MENU
 
@@ -1931,7 +1979,7 @@ async def admin_report_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Переключение интерфейса админа ---
 async def switch_to_user_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Админ переключается в пользовательский интерфейс."""
-    if update.effective_user.id != ADMIN_ID:
+    if not is_admin_id(update.effective_user.id):
         await update.message.reply_text("Недоступно.")
         return MENU
     context.user_data['admin_ui'] = False
@@ -1943,7 +1991,7 @@ async def switch_to_user_mode(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def switch_to_admin_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Админ переключается обратно в админский интерфейс."""
-    if update.effective_user.id != ADMIN_ID:
+    if not is_admin_id(update.effective_user.id):
         await update.message.reply_text("Недоступно.")
         return MENU
     context.user_data['admin_ui'] = True
@@ -2106,7 +2154,7 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Админская рассылка: /sms <текст>. Поддерживается HTML-разметка."""
     user = update.effective_user
-    if user.id != ADMIN_ID:
+    if not is_admin_id(user.id):
         await update.message.reply_text("Недоступно.")
         return
 
@@ -2143,7 +2191,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message = update.effective_message
 
-    is_admin = (user.id == ADMIN_ID)
+    is_admin = is_admin_id(user.id)
     if is_admin and context.user_data.get('admin_ui', True):
         await message.reply_text(
             "Вы админ. Используйте кнопку: Показать заказы на эту неделю.",
@@ -2182,7 +2230,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Обработка кнопки "Заказать обед" или "Да"
 async def order_lunch(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    is_admin = (update.effective_user.id == ADMIN_ID)
+    is_admin = is_admin_id(update.effective_user.id)
     if is_admin and context.user_data.get('admin_ui', True):
         await update.message.reply_text(
             "Вы админ. Используйте кнопку: Показать заказы на эту неделю.",
@@ -2202,7 +2250,7 @@ async def order_week_lunch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message = update.effective_message
 
-    is_admin = (user.id == ADMIN_ID)
+    is_admin = is_admin_id(user.id)
     if is_admin and context.user_data.get('admin_ui', True):
         await message.reply_text(
             "Вы админ. Используйте кнопку: Показать заказы на эту неделю.",
@@ -2516,8 +2564,7 @@ def _weekly_delivery_hint(context: ContextTypes.DEFAULT_TYPE) -> str:
 
 
 async def _weekly_prepare_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    is_admin_user = update.effective_user.id == ADMIN_ID
-    main_keyboard = get_main_menu_keyboard_admin() if is_admin_user else get_main_menu_keyboard()
+    main_keyboard = main_menu_keyboard_for(update.effective_user.id)
     message = update.effective_message
     if not message:
         return MENU
@@ -3025,10 +3072,7 @@ async def _finalize_single_order(update: Update, context: ContextTypes.DEFAULT_T
         f"<b>Телефон:</b> {html.escape(profile.get('phone') or 'не указан')}\n\n"
         f"<b>Быстрый просмотр:</b> <code>/order {html.escape(order_id)}</code>"
     )
-    try:
-        await context.bot.send_message(chat_id=ADMIN_ID, text=admin_text, parse_mode=ParseMode.HTML)
-    except Exception as e:
-        logging.error(f"Ошибка отправки админу {ADMIN_ID}: {e}")
+    await notify_admins(context.bot, admin_text, parse_mode=ParseMode.HTML)
 
     await send_success_gif(update)
 
@@ -3374,14 +3418,11 @@ async def _finalize_weekly_order(update: Update, context: ContextTypes.DEFAULT_T
         admin_lines.append(delivery_hint)
     admin_lines.extend(["", "<b>Дни:</b>"])
     admin_lines.extend(menu_blocks)
-    try:
-        await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text="\n".join(admin_lines),
-            parse_mode=ParseMode.HTML,
-        )
-    except Exception as e:
-        logging.error(f"Ошибка отправки пакетного заказа админу: {e}")
+    await notify_admins(
+        context.bot,
+        "\n".join(admin_lines),
+        parse_mode=ParseMode.HTML,
+    )
 
     await send_success_gif(update)
     context.user_data['last_order_ts'] = time.time()
@@ -3442,7 +3483,7 @@ async def back_to_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('weekly_mode'):
         selected_days = context.user_data.get('weekly_days') or []
         if not selected_days:
-            keyboard = get_main_menu_keyboard_admin() if update.effective_user.id == ADMIN_ID else get_main_menu_keyboard()
+            keyboard = main_menu_keyboard_for(update.effective_user.id)
             if message:
                 await message.reply_text(
                     "Не удалось восстановить выбранные дни. Начнем с меню.",
@@ -3487,7 +3528,7 @@ async def back_to_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=_weekly_picker_keyboard(picker_state),
             )
             return WEEKLY_DAY_PICK
-        keyboard = get_main_menu_keyboard_admin() if update.effective_user.id == ADMIN_ID else get_main_menu_keyboard()
+        keyboard = main_menu_keyboard_for(update.effective_user.id)
         await update.message.reply_text(
             "Возвращаемся в главное меню.",
             reply_markup=keyboard,
@@ -3534,7 +3575,7 @@ async def confirm_inline_callback(update: Update, context: ContextTypes.DEFAULT_
             pass
         selected_days = context.user_data.get('weekly_days') or []
         if not selected_days:
-            keyboard = get_main_menu_keyboard_admin() if query.from_user.id == ADMIN_ID else get_main_menu_keyboard()
+            keyboard = main_menu_keyboard_for(query.from_user.id)
             await query.message.reply_text(
                 "Не удалось восстановить выбранные дни. Начнем с меню.",
                 reply_markup=keyboard,
@@ -3627,18 +3668,15 @@ async def resolve_duplicate_order(update: Update, context: ContextTypes.DEFAULT_
     if choice == "Удалить предыдущий заказ" and oid:
         # Отменяем предыдущий заказ
         if set_order_status(oid, "cancelled_by_user"):
-            try:
-                who = admin_link_html(update.effective_user)
-                await context.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=(
-                        f"<b>🚫 Отмена заказа</b> <code>{html.escape(oid)}</code>\n"
-                        f"Кем: {who} (user_id={update.effective_user.id})"
-                    ),
-                    parse_mode=ParseMode.HTML,
-                )
-            except Exception:
-                pass
+            who = admin_link_html(update.effective_user)
+            await notify_admins(
+                context.bot,
+                (
+                    f"<b>🚫 Отмена заказа</b> <code>{html.escape(oid)}</code>\n"
+                    f"Кем: {who} (user_id={update.effective_user.id})"
+                ),
+                parse_mode=ParseMode.HTML,
+            )
         # Продолжаем оформление нового заказа с ранее выбранным количеством
         try:
             count_int = int(str(count))
@@ -3708,19 +3746,16 @@ async def resolve_duplicate_order(update: Update, context: ContextTypes.DEFAULT_
             orders[oid]['count'] = str(new_total)
             _save_orders(orders)
         # Уведомим админа об изменении
-        try:
-            who = admin_link_html(update.effective_user)
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=(
-                    f"<b>✏️ Обновление заказа</b> <code>{html.escape(oid)}</code>\n"
-                    f"Кем: {who} (user_id={update.effective_user.id})\n"
-                    f"Количество: было {prev_cnt}, стало {new_total}"
-                ),
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception:
-            pass
+        who = admin_link_html(update.effective_user)
+        await notify_admins(
+            context.bot,
+            (
+                f"<b>✏️ Обновление заказа</b> <code>{html.escape(oid)}</code>\n"
+                f"Кем: {who} (user_id={update.effective_user.id})\n"
+                f"Количество: было {prev_cnt}, стало {new_total}"
+            ),
+            parse_mode=ParseMode.HTML,
+        )
         # Сообщение пользователю
         await update.message.reply_text(
             (
@@ -3745,7 +3780,7 @@ async def resolve_weekly_duplicates(update: Update, context: ContextTypes.DEFAUL
     choice = (update.message.text or "").strip()
     duplicates = context.user_data.get('weekly_duplicates') or []
     if not duplicates:
-        main_keyboard = get_main_menu_keyboard_admin() if update.effective_user.id == ADMIN_ID else get_main_menu_keyboard()
+        main_keyboard = main_menu_keyboard_for(update.effective_user.id)
         await update.message.reply_text(
             "Предыдущих заказов для изменения не найдено. Начнем сначала.",
             reply_markup=main_keyboard,
@@ -3788,14 +3823,11 @@ async def resolve_weekly_duplicates(update: Update, context: ContextTypes.DEFAUL
                 lines.append(
                     f"• {html.escape(entry['day'])}: <code>{html.escape(entry['order_id'])}</code>"
                 )
-            try:
-                await context.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text="\n".join(lines),
-                    parse_mode=ParseMode.HTML,
-                )
-            except Exception:
-                pass
+            await notify_admins(
+                context.bot,
+                "\n".join(lines),
+                parse_mode=ParseMode.HTML,
+            )
         await update.message.reply_text(
             "Предыдущие заказы удалены. Продолжаем оформление нового недельного заказа.",
             parse_mode=ParseMode.HTML,
@@ -3835,14 +3867,11 @@ async def resolve_weekly_duplicates(update: Update, context: ContextTypes.DEFAUL
                 lines.append(
                     f"• {html.escape(day_name)}: было {prev_cnt}, стало {new_total} — <code>{html.escape(oid)}</code>"
                 )
-            try:
-                await context.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text="\n".join(lines),
-                    parse_mode=ParseMode.HTML,
-                )
-            except Exception:
-                pass
+            await notify_admins(
+                context.bot,
+                "\n".join(lines),
+                parse_mode=ParseMode.HTML,
+            )
         for day in duplicate_days:
             if day:
                 counts_map.pop(day, None)
@@ -4103,7 +4132,7 @@ async def order_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user = update.effective_user
-    is_admin = (user.id == ADMIN_ID)
+    is_admin = is_admin_id(user.id)
     is_owner = (data.get("user_id") == user.id)
     if not (is_admin or is_owner):
         await update.message.reply_text("У вас нет доступа к этому заказу.")
@@ -4161,7 +4190,7 @@ async def cancel_order_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     user = update.effective_user
-    is_admin = (user.id == ADMIN_ID)
+    is_admin = is_admin_id(user.id)
     is_owner = (data.get("user_id") == user.id)
     if not (is_admin or is_owner):
         await update.message.reply_text("У вас нет прав отменять этот заказ.")
@@ -4174,18 +4203,15 @@ async def cancel_order_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if set_order_status(order_id, "cancelled_by_user" if is_owner and not is_admin else "cancelled"):
         # Уведомим админа
-        try:
-            who = admin_link_html(user)
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=(
-                    f"<b>🚫 Отмена заказа</b> <code>{html.escape(order_id)}</code>\n"
-                    f"Кем: {who} (user_id={user.id})"
-                ),
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception:
-            pass
+        who = admin_link_html(user)
+        await notify_admins(
+            context.bot,
+            (
+                f"<b>🚫 Отмена заказа</b> <code>{html.escape(order_id)}</code>\n"
+                f"Кем: {who} (user_id={user.id})"
+            ),
+            parse_mode=ParseMode.HTML,
+        )
         await update.message.reply_text(
             f"Заказ <code>{html.escape(order_id)}</code> отменен.",
             parse_mode=ParseMode.HTML,
@@ -4209,7 +4235,7 @@ async def cancel_order_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("Заказ не найден.")
         return
     user_id = query.from_user.id
-    is_admin = (user_id == ADMIN_ID)
+    is_admin = is_admin_id(user_id)
     is_owner = (data.get("user_id") == user_id)
     if not (is_admin or is_owner):
         await query.edit_message_text("Нет прав для отмены этого заказа.")
@@ -4219,18 +4245,15 @@ async def cancel_order_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("Отмена недоступна. Заказ уже в обработке или завершен.")
         return
     if set_order_status(order_id, "cancelled_by_user" if is_owner and not is_admin else "cancelled"):
-        try:
-            who = admin_link_html(query.from_user)
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=(
-                    f"<b>🚫 Отмена заказа</b> <code>{html.escape(order_id)}</code>\n"
-                    f"Кем: {who} (user_id={query.from_user.id})"
-                ),
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception:
-            pass
+        who = admin_link_html(query.from_user)
+        await notify_admins(
+            context.bot,
+            (
+                f"<b>🚫 Отмена заказа</b> <code>{html.escape(order_id)}</code>\n"
+                f"Кем: {who} (user_id={query.from_user.id})"
+            ),
+            parse_mode=ParseMode.HTML,
+        )
         restart_markup = InlineKeyboardMarkup(
             [[
                 InlineKeyboardButton(WEEKLY_START_BUTTON_LABEL, callback_data="start_weekly_order"),
@@ -4256,7 +4279,7 @@ async def change_order_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer("Заказ не найден", show_alert=True)
         return
     user_id = query.from_user.id
-    is_admin = (user_id == ADMIN_ID)
+    is_admin = is_admin_id(user_id)
     is_owner = (order.get("user_id") == user_id)
     if not (is_admin or is_owner):
         await query.answer("Нет доступа", show_alert=True)
@@ -4338,18 +4361,15 @@ async def update_order_count_choice(update: Update, context: ContextTypes.DEFAUL
     _save_orders(orders)
 
     # Уведомим администратора
-    try:
-        await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=(
-                f"<b>✏️ Изменение заказа</b> <code>{html.escape(order_id)}</code>\n"
-                f"Клиент: {admin_link_html(update.effective_user)}\n"
-                f"Новый объем: {new_count} {_ru_obed_plural(new_count)}"
-            ),
-            parse_mode=ParseMode.HTML,
-        )
-    except Exception:
-        pass
+    await notify_admins(
+        context.bot,
+        (
+            f"<b>✏️ Изменение заказа</b> <code>{html.escape(order_id)}</code>\n"
+            f"Клиент: {admin_link_html(update.effective_user)}\n"
+            f"Новый объем: {new_count} {_ru_obed_plural(new_count)}"
+        ),
+        parse_mode=ParseMode.HTML,
+    )
 
     context.user_data.pop('update_order', None)
     context.user_data.pop('menu_for_day', None)
@@ -4394,14 +4414,12 @@ async def copy_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = context.user_data.get('state', 'unknown')
     log_user_action(update.message.from_user, f"fallback state={state}")
-    is_admin = (update.effective_user.id == ADMIN_ID)
+    is_admin = is_admin_id(update.effective_user.id)
     admin_ui = context.user_data.get('admin_ui', True)
-    kb = get_main_menu_keyboard()
-    if is_admin and not admin_ui:
-        from keyboards import get_main_menu_keyboard_admin
-        kb = get_main_menu_keyboard_admin()
-    elif is_admin and admin_ui:
-        kb = get_admin_main_keyboard()
+    if is_admin:
+        kb = get_admin_main_keyboard() if admin_ui else get_main_menu_keyboard_admin()
+    else:
+        kb = get_main_menu_keyboard()
     hint = _build_fallback_hint(context, is_admin)
     message = (
         "Кажется, я не распознал сообщение 🤔\n"
