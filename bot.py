@@ -104,6 +104,20 @@ ORDERS_FILE = "orders.json"
 ORDER_WINDOW_FILE = "order_window.json"
 PRICE_LARI = 15
 DEFAULT_BULK_MAX_PER_DAY = 10
+SALAD_PRICE_LARI = 15
+NEW_YEAR_SALADS = [
+    "Салат «Сельдь под шубой» (500 г.)",
+    "Салат «Оливье» (500 г.)",
+    "Салат с крабовыми палочками (500 г.)",
+    "Салат «Мимоза» классический (500 г.)",
+]
+NEW_YEAR_SALADS_SHORT = [
+    "Шуба",
+    "Оливье",
+    "Крабовый",
+    "Мимоза",
+]
+SALAD_NAME_TO_INDEX = {name: idx for idx, name in enumerate(NEW_YEAR_SALADS)}
 
 DAY_TO_INDEX = {
     "Понедельник": 0,
@@ -147,6 +161,8 @@ def main_menu_keyboard_for(user_id: int):
     WEEKLY_DAY_PICK,
     ORDER_COUNT,
     UPDATE_ORDER_COUNT,
+    SALAD_CHOICE,
+    SALAD_COUNT,
     ADDRESS,
     CONFIRM,
     DUPLICATE,
@@ -159,7 +175,7 @@ def main_menu_keyboard_for(user_id: int):
     ADMIN_MENU_WEEK,
     ADMIN_MENU_PHOTO,
     ADMIN_MENU_UPLOAD_PHOTO,
-) = range(17)
+) = range(19)
 
 # Настройка логирования с TimedRotatingFileHandler
 logger = logging.getLogger()
@@ -388,6 +404,22 @@ def _weekly_picker_set_selection(state: dict, selected_days: list[str]) -> None:
     state['selection'] = list(selected_days)
 
 
+def _weekly_picker_selected_salads(state: dict) -> list[int]:
+    selected = []
+    for raw_idx in state.get('salad_selection', []) or []:
+        try:
+            idx = int(raw_idx)
+        except Exception:
+            continue
+        if 0 <= idx < len(NEW_YEAR_SALADS):
+            selected.append(idx)
+    return selected
+
+
+def _weekly_picker_set_salad_selection(state: dict, selection: list[int]) -> None:
+    state['salad_selection'] = list(selection)
+
+
 def _weekly_picker_text(state: dict) -> str:
     week_label = str(state.get('week_label') or '').strip()
     lines: list[str] = []
@@ -397,7 +429,7 @@ def _weekly_picker_text(state: dict) -> str:
     lines.append(header)
     lines.extend([
         "",
-        "Отметьте дни, для которых хотите оформить заказ. После выбора нажмите «Продолжить».",
+        "Отметьте дни и/или салаты. После выбора нажмите «Продолжить».",
     ])
     selected = _weekly_picker_selected(state)
     if selected:
@@ -406,6 +438,14 @@ def _weekly_picker_text(state: dict) -> str:
             lines.append(f"• {html.escape(day)}")
     else:
         lines.extend(["", "Пока ничего не выбрано."])
+
+    salads_selected = _weekly_picker_selected_salads(state)
+    lines.extend(["", "<b>Выбраны салаты:</b>"])
+    if salads_selected:
+        for idx in salads_selected:
+            lines.append(f"• {html.escape(NEW_YEAR_SALADS[idx])}")
+    else:
+        lines.append("• не выбраны")
 
     unavailable = state.get('unavailable') or []
     if unavailable:
@@ -444,9 +484,168 @@ def _weekly_picker_keyboard(state: dict) -> InlineKeyboardMarkup:
             InlineKeyboardButton("Выбрать все", callback_data="weekly_all"),
             InlineKeyboardButton("Снять все", callback_data="weekly_none"),
         ])
+    salad_selection = set(_weekly_picker_selected_salads(state))
+    for idx, name in enumerate(NEW_YEAR_SALADS):
+        mark = "✅" if idx in salad_selection else "⬜️"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{mark} {name}",
+                callback_data=f"weekly_salad_toggle:{idx}",
+            )
+        ])
+    if NEW_YEAR_SALADS:
+        buttons.append([
+            InlineKeyboardButton("Все салаты", callback_data="weekly_salad_all"),
+            InlineKeyboardButton("Без салатов", callback_data="weekly_salad_none"),
+        ])
     buttons.append([InlineKeyboardButton("Продолжить", callback_data="weekly_continue")])
     buttons.append([InlineKeyboardButton("Отмена", callback_data="weekly_cancel")])
     return InlineKeyboardMarkup(buttons)
+
+
+def _get_salad_picker_state(context: ContextTypes.DEFAULT_TYPE) -> dict | None:
+    state = context.user_data.get('salad_picker_state')
+    return state if isinstance(state, dict) else None
+
+
+def _set_salad_picker_state(context: ContextTypes.DEFAULT_TYPE, state: dict) -> None:
+    context.user_data['salad_picker_state'] = state
+
+
+def _salad_picker_selected(state: dict) -> list[int]:
+    selection = state.get('selection') or []
+    selected: list[int] = []
+    for raw_idx in selection:
+        try:
+            idx = int(raw_idx)
+        except Exception:
+            continue
+        if 0 <= idx < len(NEW_YEAR_SALADS):
+            selected.append(idx)
+    return selected
+
+
+def _salad_picker_text(state: dict) -> str:
+    lines: list[str] = ["<b>Новогодние салаты (500 г.)</b>"]
+    lines.append(f"Цена: {SALAD_PRICE_LARI} GEL за салат.")
+    flow = str(state.get('flow') or '')
+    delivery_day = str(state.get('delivery_day') or '').strip()
+    if flow == 'weekly' and delivery_day:
+        lines.append(f"<i>Салаты доставим в {html.escape(delivery_day)}.</i>")
+    lines.extend(["", "Выберите салаты. Если не нужны — нажмите «Продолжить»."])
+    selected = _salad_picker_selected(state)
+    if selected:
+        lines.extend(["", "<b>Выбраны салаты:</b>"])
+        for idx in selected:
+            name = NEW_YEAR_SALADS[idx]
+            lines.append(f"• {html.escape(name)}")
+    else:
+        lines.extend(["", "Пока ничего не выбрано."])
+    return "\n".join(lines)
+
+
+def _salad_picker_keyboard(state: dict) -> InlineKeyboardMarkup:
+    selection = set(_salad_picker_selected(state))
+    buttons: list[list[InlineKeyboardButton]] = []
+    for idx, name in enumerate(NEW_YEAR_SALADS):
+        mark = "✅" if idx in selection else "⬜️"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{mark} {name}",
+                callback_data=f"salad_pick:{idx}",
+            )
+        ])
+    if buttons:
+        buttons.append([
+            InlineKeyboardButton("Выбрать все", callback_data="salad_pick_all"),
+            InlineKeyboardButton("Снять все", callback_data="salad_pick_none"),
+        ])
+    buttons.append([InlineKeyboardButton("Продолжить", callback_data="salad_pick_continue")])
+    buttons.append([InlineKeyboardButton("Отмена", callback_data="salad_pick_cancel")])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def _salad_picker_refresh_message(query, state: dict) -> None:
+    message_text = _salad_picker_text(state)
+    try:
+        await query.edit_message_text(
+            message_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=_salad_picker_keyboard(state),
+        )
+    except BadRequest as exc:
+        if 'Message is not modified' not in str(exc):
+            raise
+
+
+def _get_salad_counter_state(context: ContextTypes.DEFAULT_TYPE) -> dict | None:
+    state = context.user_data.get('salad_counter_state')
+    return state if isinstance(state, dict) else None
+
+
+def _set_salad_counter_state(context: ContextTypes.DEFAULT_TYPE, state: dict) -> None:
+    context.user_data['salad_counter_state'] = state
+
+
+def _salad_counter_text(state: dict) -> str:
+    lines = ["Укажите количество для каждого салата."]
+    flow = str(state.get('flow') or '')
+    delivery_day = str(state.get('delivery_day') or '').strip()
+    if flow == 'weekly' and delivery_day:
+        lines.insert(0, f"<i>Салаты доставим в {html.escape(delivery_day)}.</i>")
+    return "\n".join(lines)
+
+
+def _salad_counter_keyboard(state: dict) -> InlineKeyboardMarkup:
+    selection: list[int] = state.get('selection') or []
+    counts: dict = state.get('counts') or {}
+    buttons: list[list[InlineKeyboardButton]] = []
+    for idx in selection:
+        if not (0 <= idx < len(NEW_YEAR_SALADS)):
+            continue
+        try:
+            count = int(counts.get(idx, 1))
+        except Exception:
+            count = 1
+        if count < 1:
+            count = 1
+        name = NEW_YEAR_SALADS_SHORT[idx] if idx < len(NEW_YEAR_SALADS_SHORT) else NEW_YEAR_SALADS[idx]
+        buttons.append([
+            InlineKeyboardButton("➖", callback_data=f"salad_count:dec:{idx}"),
+            InlineKeyboardButton(f"{name} x {count}", callback_data=f"salad_count:noop:{idx}"),
+            InlineKeyboardButton("➕", callback_data=f"salad_count:inc:{idx}"),
+        ])
+    buttons.append([
+        InlineKeyboardButton("Продолжить", callback_data="salad_count:done:*"),
+        InlineKeyboardButton("Назад", callback_data="salad_count:back:*"),
+    ])
+    buttons.append([InlineKeyboardButton("Отмена", callback_data="salad_count:cancel:*")])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def _salad_counter_refresh_markup(query, state: dict) -> None:
+    try:
+        await query.edit_message_reply_markup(
+            reply_markup=_salad_counter_keyboard(state)
+        )
+    except BadRequest as exc:
+        if "Message is not modified" in str(exc):
+            return
+        logging.warning(f"Не удалось обновить клавиатуру салатов: {exc}")
+
+
+def _clear_salad_flow_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    keys = [
+        'salad_picker_state',
+        'salad_counter_state',
+        'awaiting_salad_choice',
+        'awaiting_salad_count',
+        'pending_salad_name',
+    ]
+    for key in keys:
+        context.user_data.pop(key, None)
+    if context.user_data.get('salad_flow'):
+        context.user_data.pop('salad_flow', None)
 
 
 def log_user_action(user, action):
@@ -729,7 +928,18 @@ def _bulk_max_per_day(context: ContextTypes.DEFAULT_TYPE) -> int | None:
 
 async def _bulk_refresh_markup(query, context: ContextTypes.DEFAULT_TYPE, state: dict[str, dict]) -> None:
     max_per_day = _bulk_max_per_day(context)
-    markup = get_bulk_counter_keyboard(state, max_per_day)
+    salad_counts = _get_bulk_salad_counts(context)
+    salad_labels = NEW_YEAR_SALADS_SHORT if len(NEW_YEAR_SALADS_SHORT) == len(NEW_YEAR_SALADS) else NEW_YEAR_SALADS
+    salad_selection = context.user_data.get('weekly_salad_selection') or []
+    salad_indices: list[int] = []
+    for idx in salad_selection:
+        try:
+            idx_int = int(idx)
+        except Exception:
+            continue
+        if 0 <= idx_int < len(NEW_YEAR_SALADS):
+            salad_indices.append(idx_int)
+    markup = get_bulk_counter_keyboard(state, max_per_day, salad_counts, salad_labels, salad_indices)
     try:
         await query.edit_message_reply_markup(reply_markup=markup)
     except BadRequest as exc:
@@ -758,6 +968,49 @@ def _bulk_selected_entries(context: ContextTypes.DEFAULT_TYPE) -> list[tuple[str
 
 def _bulk_selected_counts_map(context: ContextTypes.DEFAULT_TYPE) -> dict[str, int]:
     return {day: count for day, count in _bulk_selected_entries(context)}
+
+
+def _get_bulk_salad_counts(context: ContextTypes.DEFAULT_TYPE) -> dict[int, int]:
+    raw = context.user_data.get('bulk_salad_counts')
+    counts: dict[int, int] = {}
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            try:
+                idx = int(key)
+            except Exception:
+                continue
+            try:
+                count = int(value)
+            except Exception:
+                count = 0
+            if count < 0:
+                count = 0
+            counts[idx] = count
+    normalized: dict[int, int] = {}
+    for idx in range(len(NEW_YEAR_SALADS)):
+        normalized[idx] = max(0, int(counts.get(idx, 0)))
+    context.user_data['bulk_salad_counts'] = normalized
+    return normalized
+
+
+def _seed_bulk_salad_counts(context: ContextTypes.DEFAULT_TYPE) -> dict[int, int]:
+    counts = _get_bulk_salad_counts(context)
+    weekly_salads = _normalize_salads(context.user_data.get('weekly_salads'))
+    if weekly_salads:
+        seeded = _salads_counts_map(weekly_salads)
+        counts.update({idx: max(0, count) for idx, count in seeded.items()})
+    else:
+        selection = context.user_data.get('weekly_salad_selection') or []
+        for idx in selection:
+            try:
+                idx_int = int(idx)
+            except Exception:
+                continue
+            if 0 <= idx_int < len(NEW_YEAR_SALADS):
+                if counts.get(idx_int, 0) <= 0:
+                    counts[idx_int] = 1
+    context.user_data['bulk_salad_counts'] = counts
+    return counts
 
 
 def _bulk_total_meals(counts_map: Mapping[str, int]) -> int:
@@ -813,8 +1066,9 @@ async def _bulk_start_quantity_selection(
     previous_draft = context.user_data.get('pending_weekly_order')
     state = reset_bulk_order_state(context, selected_days, previous_draft)
     max_per_day = _bulk_max_per_day(context)
+    salad_counts = _seed_bulk_salad_counts(context)
 
-    lines: list[str] = ["Используйте кнопки ниже, чтобы указать количество на каждый день."]
+    lines: list[str] = ["Используйте кнопки ниже, чтобы указать количество на каждый день и салаты."]
     if week_label:
         lines.insert(0, f"<i>Неделя:</i> {html.escape(week_label)}")
     if delivery_note:
@@ -822,7 +1076,17 @@ async def _bulk_start_quantity_selection(
     if isinstance(max_per_day, int):
         lines.append(f"Максимум — {max_per_day} {_ru_obed_plural(max_per_day)} в день.")
 
-    markup = get_bulk_counter_keyboard(state, max_per_day)
+    salad_labels = NEW_YEAR_SALADS_SHORT if len(NEW_YEAR_SALADS_SHORT) == len(NEW_YEAR_SALADS) else NEW_YEAR_SALADS
+    salad_selection = context.user_data.get('weekly_salad_selection') or []
+    salad_indices: list[int] = []
+    for idx in salad_selection:
+        try:
+            idx_int = int(idx)
+        except Exception:
+            continue
+        if 0 <= idx_int < len(NEW_YEAR_SALADS):
+            salad_indices.append(idx_int)
+    markup = get_bulk_counter_keyboard(state, max_per_day, salad_counts, salad_labels, salad_indices)
     await message.reply_text(
         "\n".join(lines),
         parse_mode=ParseMode.HTML,
@@ -884,7 +1148,9 @@ async def _bulk_handle_next(update: Update, query, context: ContextTypes.DEFAULT
             label = str(info.get('label') or _bulk_day_label(code) or code)
             zero_selected.append(label)
 
-    if zero_selected:
+    salad_counts = _get_bulk_salad_counts(context)
+    salad_total = sum(max(0, int(v)) for v in salad_counts.values())
+    if zero_selected and salad_total <= 0:
         if len(zero_selected) == 1:
             warning = f"Для дня {zero_selected[0]} выбрано 0 обедов. Укажите количество или уберите этот день."
         else:
@@ -896,8 +1162,8 @@ async def _bulk_handle_next(update: Update, query, context: ContextTypes.DEFAULT
         return ORDER_COUNT
 
     entries = _bulk_selected_entries(context)
-    if not entries:
-        await query.answer("Выберите хотя бы один день и укажите количество.", show_alert=True)
+    if not entries and salad_total <= 0:
+        await query.answer("Выберите хотя бы один день или салат.", show_alert=True)
         return ORDER_COUNT
 
     try:
@@ -907,12 +1173,27 @@ async def _bulk_handle_next(update: Update, query, context: ContextTypes.DEFAULT
             logging.debug(f"Не удалось снять клавиатуру bulk: {exc}")
 
     counts_map = {day: count for day, count in entries}
-    ordered_days = [day for day, _ in entries]
+    if entries:
+        ordered_days = [day for day, _ in entries]
+    else:
+        ordered_days = [str(info.get('label') or _bulk_day_label(code) or code) for code, info in state.items() if info.get('selected')]
     context.user_data['weekly_days'] = ordered_days
     context.user_data['weekly_days_to_order'] = list(ordered_days)
     context.user_data['weekly_counts'] = counts_map
     context.user_data.pop('selected_count', None)
-    context.user_data['pending_weekly_order'] = {'items': counts_map.copy()}
+    weekly_salads: list[dict] = []
+    for idx, count in salad_counts.items():
+        if count <= 0:
+            continue
+        if 0 <= idx < len(NEW_YEAR_SALADS):
+            weekly_salads.append({"name": NEW_YEAR_SALADS[idx], "count": int(count)})
+    context.user_data['weekly_salads'] = weekly_salads
+    context.user_data['weekly_salads_done'] = True
+    context.user_data.pop('weekly_salad_selection', None)
+    context.user_data['pending_weekly_order'] = {
+        'items': counts_map.copy(),
+        'salads': weekly_salads,
+    }
 
     week_start_iso = context.user_data.get('order_week_start')
     week_start_date = None
@@ -988,6 +1269,47 @@ async def bulk_counter_callback(update: Update, context: ContextTypes.DEFAULT_TY
     action = (action or "").strip().lower()
     target = (target or "").strip().lower()
     log_user_action(query.from_user, f"bulk_action:{action}:{target or '*'}")
+
+    if action == "salad":
+        subaction = parts[2] if len(parts) > 2 else ""
+        subtarget = parts[3] if len(parts) > 3 else ""
+        subaction = (subaction or "").strip().lower()
+        subtarget = (subtarget or "").strip().lower()
+        counts = _get_bulk_salad_counts(context)
+        allowed_indices = set()
+        for raw_idx in context.user_data.get('weekly_salad_selection') or []:
+            try:
+                idx_val = int(raw_idx)
+            except Exception:
+                continue
+            if 0 <= idx_val < len(NEW_YEAR_SALADS):
+                allowed_indices.add(idx_val)
+        if subaction == "noop":
+            await query.answer()
+            return ORDER_COUNT
+        try:
+            idx = int(subtarget)
+        except Exception:
+            await query.answer()
+            return ORDER_COUNT
+        if not (0 <= idx < len(NEW_YEAR_SALADS)) or (allowed_indices and idx not in allowed_indices):
+            await query.answer()
+            return ORDER_COUNT
+        current = counts.get(idx, 0)
+        if subaction == "inc":
+            counts[idx] = current + 1
+        elif subaction == "dec":
+            if current <= 0:
+                await query.answer("Минимум — 0.", show_alert=True)
+                return ORDER_COUNT
+            counts[idx] = max(0, current - 1)
+        else:
+            await query.answer()
+            return ORDER_COUNT
+        context.user_data['bulk_salad_counts'] = counts
+        await _bulk_refresh_markup(query, context, get_bulk_order_state(context))
+        await query.answer()
+        return ORDER_COUNT
 
     # Отдельная обработка действий «дальше» и «отмена»
     if action == "cancel":
@@ -1123,10 +1445,15 @@ def _clear_weekly_context(context: ContextTypes.DEFAULT_TYPE) -> None:
         'weekly_duplicates',
         'weekly_duplicate_days',
         'weekly_picker_state',
+        'weekly_salads',
+        'weekly_salads_done',
+        'weekly_salad_selection',
+        'bulk_salad_counts',
     ]
     for key in keys:
         context.user_data.pop(key, None)
     clear_bulk_order_state(context)
+    _clear_salad_flow_state(context)
 
 
 def _current_week_start(now: datetime | None = None) -> date:
@@ -1306,6 +1633,17 @@ def format_menu_html(menu_data: dict) -> str:
                 lines.append(f"• {html.escape(str(it))}")
         else:
             lines.append(f"• {html.escape(str(items))}")
+    return "\n".join(lines)
+
+
+def _build_salads_offer_text() -> str:
+    lines = [
+        "<b>Дополнительно на этой неделе: новогодние салаты (500 г.)</b>",
+    ]
+    for item in NEW_YEAR_SALADS:
+        lines.append(f"• {html.escape(item)} — {SALAD_PRICE_LARI} GEL")
+    lines.append("")
+    lines.append("Добавить салаты можно при оформлении заказа.")
     return "\n".join(lines)
 
 
@@ -1890,6 +2228,7 @@ async def admin_report_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     totals_by_day = {}
     cancelled_by_day = {}
     grand = 0
+    grand_sum = 0
 
     def _count_int(v):
         try:
@@ -1932,14 +2271,15 @@ async def admin_report_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Активные
             if active_block:
                 day_count = active_block["count"]
-                day_sum = day_count * PRICE_LARI
+                day_sum = 0
                 lines.append(
-                    f"\n<b>{html.escape(d_name)}</b> — {day_count} {_ru_obed_plural(day_count)} / {day_sum} лари"
+                    f"\n<b>{html.escape(d_name)}</b> — {day_count} {_ru_obed_plural(day_count)}"
                 )
                 for o in active_block["items"]:
                     oid = o.get("__id")
                     cnt = _count_int(o.get("count", 1))
-                    order_sum = cnt * PRICE_LARI
+                    salads_cost = _salads_cost(_normalize_salads(o.get("salads")))
+                    order_sum = cnt * PRICE_LARI + salads_cost
                     addr_txt = str(o.get("address") or "-").strip()
                     uid = int(o.get("user_id") or 0)
                     uname = o.get("username") or ""
@@ -1950,6 +2290,9 @@ async def admin_report_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"• <code>/order {html.escape(oid)}</code> — {cnt} {_ru_obed_plural(cnt)} "
                         f"({order_sum} лари) — {html.escape(addr_txt)} — {cust}{username_part}"
                     )
+                    day_sum += order_sum
+                    grand_sum += order_sum
+                lines.append(f"<i>Сумма за день:</i> {day_sum} лари")
 
             # Отмененные (не входят в итоги)
             if cancelled_block:
@@ -1957,7 +2300,8 @@ async def admin_report_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for o in cancelled_block:
                     oid = o.get("__id")
                     cnt = _count_int(o.get("count", 1))
-                    order_sum = cnt * PRICE_LARI
+                    salads_cost = _salads_cost(_normalize_salads(o.get("salads")))
+                    order_sum = cnt * PRICE_LARI + salads_cost
                     addr_txt = str(o.get("address") or "-").strip()
                     uid = int(o.get("user_id") or 0)
                     uname = o.get("username") or ""
@@ -1970,7 +2314,7 @@ async def admin_report_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
 
         lines.append(
-            f"\n<b>Итого (без отмененных):</b> {grand} {_ru_obed_plural(grand)} / {grand*PRICE_LARI} лари"
+            f"\n<b>Итого (без отмененных):</b> {grand} {_ru_obed_plural(grand)} / {grand_sum} лари"
         )
 
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=get_admin_report_keyboard())
@@ -2018,6 +2362,115 @@ def _ru_obed_plural(n: int) -> str:
     if 2 <= n1 <= 4:
         return "обеда"
     return "обедов"
+
+def _normalize_salads(raw: object) -> list[dict]:
+    if raw is None:
+        return []
+    items = raw
+    if isinstance(raw, dict):
+        items = [raw]
+    if not isinstance(items, list):
+        return []
+    normalized: list[dict] = []
+    for entry in items:
+        if isinstance(entry, dict):
+            name = str(entry.get("name") or "").strip()
+            count_raw = entry.get("count", 1)
+        else:
+            name = str(entry).strip()
+            count_raw = 1
+        if not name:
+            continue
+        try:
+            count = int(str(count_raw).split()[0])
+        except Exception:
+            count = 1
+        if count <= 0:
+            continue
+        normalized.append({"name": name, "count": count})
+    return normalized
+
+def _salads_cost(salads: list[dict]) -> int:
+    total = 0
+    for entry in salads:
+        try:
+            cnt = int(str(entry.get("count", 1)).split()[0])
+        except Exception:
+            cnt = 1
+        if cnt > 0:
+            total += cnt * SALAD_PRICE_LARI
+    return total
+
+def _salads_lines_html(salads: list[dict], bullet: str = "•") -> str:
+    lines: list[str] = []
+    for entry in salads:
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            cnt = int(str(entry.get("count", 1)).split()[0])
+        except Exception:
+            cnt = 1
+        if cnt <= 0:
+            continue
+        lines.append(f"{bullet} {html.escape(name)} — {cnt} шт.")
+    return "\n".join(lines)
+
+def _salads_summary_block(salads: list[dict], bullet: str = "•") -> str:
+    if not salads:
+        return ""
+    lines = _salads_lines_html(salads, bullet=bullet)
+    if not lines:
+        return ""
+    return "<b>Новогодние салаты:</b>\n" + lines
+
+def _merge_salads(existing: object, additions: list[dict]) -> list[dict]:
+    merged: dict[str, int] = {}
+    for entry in _normalize_salads(existing):
+        name = entry.get("name")
+        if not name:
+            continue
+        merged[name] = merged.get(name, 0) + int(entry.get("count", 1))
+    for entry in _normalize_salads(additions):
+        name = entry.get("name")
+        if not name:
+            continue
+        merged[name] = merged.get(name, 0) + int(entry.get("count", 1))
+    return [{"name": name, "count": count} for name, count in merged.items() if count > 0]
+
+def _salads_to_indices(salads: list[dict]) -> list[int]:
+    indices: list[int] = []
+    seen: set[int] = set()
+    for entry in _normalize_salads(salads):
+        name = entry.get("name")
+        if not name:
+            continue
+        idx = SALAD_NAME_TO_INDEX.get(name)
+        if idx is None:
+            continue
+        idx = int(idx)
+        if idx in seen:
+            continue
+        seen.add(idx)
+        indices.append(idx)
+    return indices
+
+def _salads_counts_map(salads: list[dict]) -> dict[int, int]:
+    counts: dict[int, int] = {}
+    for entry in _normalize_salads(salads):
+        name = entry.get("name")
+        if not name:
+            continue
+        idx = SALAD_NAME_TO_INDEX.get(name)
+        if idx is None:
+            continue
+        try:
+            cnt = int(entry.get("count", 1))
+        except Exception:
+            cnt = 1
+        if cnt > 0:
+            counts[int(idx)] = cnt
+    return counts
 
 async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает заказы на текущую или следующую неделю в зависимости от статуса приёма."""
@@ -2138,6 +2591,13 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for it in items:
                 lines.append(f"• {html.escape(it)}")
 
+        salads = _normalize_salads(o.get("salads"))
+        if salads:
+            salads_lines = _salads_lines_html(salads)
+            if salads_lines:
+                lines.append("<b>Новогодние салаты:</b>")
+                lines.append(salads_lines)
+
         order_id = o.get('__id') or ''
         lines.append(f"<code>/order {html.escape(order_id)}</code>")
         lines.append("")
@@ -2221,6 +2681,11 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_day_keyboard(),
     )
     await message.reply_text(
+        _build_salads_offer_text(),
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_day_keyboard(),
+    )
+    await message.reply_text(
         "⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡⩡",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton(WEEKLY_START_BUTTON_LABEL, callback_data="start_weekly_order")]]
@@ -2241,6 +2706,10 @@ async def order_lunch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _clear_weekly_context(context)
     context.user_data.pop('order_for_next_week', None)
     context.user_data.pop('order_week_start', None)
+    context.user_data.pop('selected_salads', None)
+    context.user_data.pop('pending_salad_name', None)
+    context.user_data.pop('awaiting_salad_choice', None)
+    context.user_data.pop('awaiting_salad_count', None)
     await update.message.reply_text("<b>Выберите день недели:</b>", parse_mode=ParseMode.HTML, reply_markup=get_day_keyboard())
     return ORDER_DAY
 async def order_week_lunch(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2258,6 +2727,14 @@ async def order_week_lunch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return MENU
     log_user_action(user, "order_week_lunch")
+    context.user_data.pop('selected_salads', None)
+    context.user_data.pop('pending_salad_name', None)
+    context.user_data.pop('awaiting_salad_choice', None)
+    context.user_data.pop('awaiting_salad_count', None)
+    context.user_data.pop('weekly_salads', None)
+    context.user_data.pop('weekly_salads_done', None)
+    if context.user_data.get('salad_flow') == 'weekly':
+        context.user_data.pop('salad_flow', None)
     menu_data = load_menu()
     main_keyboard = get_main_menu_keyboard_admin() if is_admin else get_main_menu_keyboard()
     if not menu_data or not isinstance(menu_data.get('menu'), dict) or not menu_data['menu']:
@@ -2325,6 +2802,7 @@ async def order_week_lunch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'unavailable': unavailable,
         'week_label': menu_data.get('week') or '',
         'selection': [],
+        'salad_selection': [],
     }
     _set_weekly_picker_state(context, picker_state)
 
@@ -2421,6 +2899,57 @@ async def weekly_picker_clear(update: Update, context: ContextTypes.DEFAULT_TYPE
     return WEEKLY_DAY_PICK
 
 
+async def weekly_salad_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    log_user_action(query.from_user, f"weekly_salad_toggle:{query.data}")
+    state = _get_weekly_picker_state(context)
+    if not state:
+        await query.edit_message_text("Выбор устарел. Начните заново /start.")
+        return MENU
+    try:
+        _, idx_str = query.data.split(":", 1)
+        idx = int(idx_str)
+    except Exception:
+        return WEEKLY_DAY_PICK
+    if not (0 <= idx < len(NEW_YEAR_SALADS)):
+        return WEEKLY_DAY_PICK
+    current = set(_weekly_picker_selected_salads(state))
+    if idx in current:
+        current.remove(idx)
+    else:
+        current.add(idx)
+    _weekly_picker_set_salad_selection(state, sorted(current))
+    await _weekly_picker_refresh_message(query, state)
+    return WEEKLY_DAY_PICK
+
+
+async def weekly_salad_select_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    log_user_action(query.from_user, "weekly_salad_select_all")
+    state = _get_weekly_picker_state(context)
+    if not state:
+        await query.edit_message_text("Выбор устарел. Начните заново /start.")
+        return MENU
+    _weekly_picker_set_salad_selection(state, list(range(len(NEW_YEAR_SALADS))))
+    await _weekly_picker_refresh_message(query, state)
+    return WEEKLY_DAY_PICK
+
+
+async def weekly_salad_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    log_user_action(query.from_user, "weekly_salad_clear")
+    state = _get_weekly_picker_state(context)
+    if not state:
+        await query.edit_message_text("Выбор устарел. Начните заново /start.")
+        return MENU
+    _weekly_picker_set_salad_selection(state, [])
+    await _weekly_picker_refresh_message(query, state)
+    return WEEKLY_DAY_PICK
+
+
 async def weekly_picker_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -2450,11 +2979,14 @@ async def weekly_picker_continue(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("Выбор дней устарел. Начните заново /start.")
         return MENU
     selected_days = _weekly_picker_selected(state)
-    if not selected_days:
-        await query.answer("Выберите хотя бы один день.", show_alert=True)
+    selected_salads = _weekly_picker_selected_salads(state)
+    if not selected_days and not selected_salads:
+        await query.answer("Выберите хотя бы один день или салат.", show_alert=True)
+        return WEEKLY_DAY_PICK
+    if not selected_days and selected_salads:
+        await query.answer("Выберите день доставки салатов.", show_alert=True)
         return WEEKLY_DAY_PICK
     await query.answer()
-
     available = state.get('available') or {}
     week_starts = [available[day].get('week_start') for day in selected_days if day in available]
     target_week_iso = next((ws for ws in week_starts if ws), None)
@@ -2481,6 +3013,7 @@ async def weekly_picker_continue(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data['weekly_menu'] = weekly_menu
     context.user_data['order_for_next_week'] = bool(is_next_week_delivery)
     context.user_data['order_week_start'] = target_week_iso
+    context.user_data['weekly_salad_selection'] = selected_salads
     previous_draft = context.user_data.get('pending_weekly_order')
     context.user_data.pop('selected_count', None)
     context.user_data.pop('pending_weekly_order', None)
@@ -2588,22 +3121,27 @@ async def _weekly_prepare_confirmation(update: Update, context: ContextTypes.DEF
     days_all = context.user_data.get('weekly_days_to_order') or context.user_data.get('weekly_days') or []
     days = [day for day in days_all if int(counts_map.get(day, 0) or 0) > 0]
     if not days:
-        await message.reply_text(
-            "Не удалось определить дни доставки. Попробуйте начать заново.",
-            reply_markup=main_keyboard,
-        )
-        _clear_weekly_context(context)
-        return MENU
+        weekly_salads = _normalize_salads(context.user_data.get('weekly_salads'))
+        if not weekly_salads:
+            await message.reply_text(
+                "Не удалось определить дни доставки. Попробуйте начать заново.",
+                reply_markup=main_keyboard,
+            )
+            _clear_weekly_context(context)
+            return MENU
 
     counts_map = {day: int(counts_map.get(day, 0)) for day in days}
     total_meals = _bulk_total_meals(counts_map)
-    if total_meals <= 0:
+    weekly_salads = _normalize_salads(context.user_data.get('weekly_salads'))
+    if total_meals <= 0 and not weekly_salads:
         await message.reply_text(
             "Выберите хотя бы один день и количество обедов.",
             reply_markup=main_keyboard,
         )
         return ORDER_COUNT
-    total_cost = total_meals * PRICE_LARI
+    if not context.user_data.get('weekly_salads_done'):
+        context.user_data['weekly_salads'] = _normalize_salads(context.user_data.get('weekly_salads'))
+        context.user_data['weekly_salads_done'] = True
 
     profile = context.user_data.get('profile')
     if not profile:
@@ -2615,8 +3153,14 @@ async def _weekly_prepare_confirmation(update: Update, context: ContextTypes.DEF
     menu_html = _build_weekly_menu_html(days, menu_map, counts_map)
     delivery_hint = _weekly_delivery_hint(context)
 
+    salads_cost = _salads_cost(weekly_salads)
+    total_cost = total_meals * PRICE_LARI + salads_cost
+
     context.user_data['weekly_counts'] = counts_map
-    context.user_data['pending_weekly_order'] = {'items': counts_map.copy()}
+    context.user_data['pending_weekly_order'] = {
+        'items': counts_map.copy(),
+        'salads': weekly_salads,
+    }
 
     profile = profile or {}
     addr = profile.get('address')
@@ -2627,9 +3171,18 @@ async def _weekly_prepare_confirmation(update: Update, context: ContextTypes.DEF
     parts = ["<b>Подтвердите заказ на неделю</b>", ""]
     parts.append(f"<b>Всего обедов:</b> {total_meals} {_ru_obed_plural(total_meals)}")
     parts.append(f"<b>Сумма к оплате:</b> {total_cost} лари")
+    if weekly_salads:
+        delivery_days = context.user_data.get('weekly_days') or context.user_data.get('weekly_days_to_order') or []
+        delivery_day = delivery_days[0] if delivery_days else (days[0] if days else "")
+        parts.extend(["", _salads_summary_block(weekly_salads)])
+        if delivery_day:
+            parts.append(f"<i>Салаты доставим в {html.escape(delivery_day)}.</i>")
     if delivery_hint:
         parts.append(delivery_hint)
-    parts.extend(["", "<b>Дни и меню:</b>", menu_html, ""])
+    if days:
+        parts.extend(["", "<b>Дни и меню:</b>", menu_html, ""])
+    else:
+        parts.extend(["", "<b>Обеды:</b> не выбраны"])
     parts.append(f"<b>Адрес доставки:</b>\n{addr_display}")
     parts.append(f"<b>Телефон:</b> {phone_display}")
     if not addr or not phone_line:
@@ -2707,6 +3260,133 @@ async def select_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ORDER_COUNT
 
+async def _prompt_salad_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data['salad_flow'] = 'single'
+    context.user_data['awaiting_salad_choice'] = True
+    context.user_data.pop('awaiting_salad_count', None)
+    context.user_data.pop('pending_salad_name', None)
+    existing = _normalize_salads(context.user_data.get('selected_salads'))
+    selection = _salads_to_indices(existing)
+    state = {
+        'selection': selection,
+        'flow': 'single',
+    }
+    _set_salad_picker_state(context, state)
+    message = update.effective_message
+    if message:
+        await message.reply_text(
+            _salad_picker_text(state),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_salad_picker_keyboard(state),
+        )
+    return SALAD_CHOICE
+
+
+async def _continue_single_order_after_count(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.pop('awaiting_salad_choice', None)
+    context.user_data.pop('awaiting_salad_count', None)
+    context.user_data.pop('pending_salad_name', None)
+    if context.user_data.get('salad_flow') == 'single':
+        context.user_data.pop('salad_flow', None)
+    day = context.user_data.get('selected_day', '(не выбран)')
+    week_start_iso = context.user_data.get('order_week_start')
+    week_start_date = None
+    if week_start_iso:
+        try:
+            week_start_date = date.fromisoformat(str(week_start_iso))
+        except Exception:
+            week_start_date = None
+    menu_data = load_menu()
+    menu_for_day = menu_data['menu'].get(day, '') if menu_data else ''
+    if isinstance(menu_for_day, list):
+        menu_for_day_text = ", ".join(menu_for_day)
+    else:
+        menu_for_day_text = str(menu_for_day)
+
+    context.user_data['menu_for_day'] = menu_for_day_text
+    selected_salads = _normalize_salads(context.user_data.get('selected_salads'))
+
+    same = find_user_order_same_day(update.effective_user.id, day, week_start_date)
+    if same:
+        oid, payload = same
+        try:
+            prev_cnt = int(str(payload.get('count', 1)).split()[0])
+        except Exception:
+            prev_cnt = 1
+        context.user_data['duplicate_target'] = {
+            'order_id': oid,
+            'prev_count': prev_cnt,
+            'day': day,
+        }
+        msg = (
+            f"На <b>{html.escape(day)}</b> у вас уже есть заказ: "
+            f"<code>/order {html.escape(oid)}</code>\n\n"
+            "Что сделать с предыдущим заказом?"
+        )
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=get_duplicate_resolution_keyboard())
+        return DUPLICATE
+
+    profile = context.user_data.get('profile')
+    if not profile:
+        profile = get_user_profile(update.effective_user.id)
+        if profile:
+            context.user_data['profile'] = profile
+    profile = profile or {}
+
+    count = context.user_data.get('selected_count')
+    context.user_data['pending_order'] = {
+        'day': day,
+        'count': count,
+        'menu': menu_for_day_text,
+        'salads': selected_salads,
+    }
+
+    menu_lines_html = "\n".join(
+        f" - {html.escape(it.strip())}" for it in str(menu_for_day_text).split(',') if it.strip()
+    )
+    try:
+        count_int = int(str(count))
+    except Exception:
+        count_int = 1
+    base_cost = count_int * PRICE_LARI
+    salads_cost = _salads_cost(selected_salads)
+    total_cost = base_cost + salads_cost
+    week_notice = "\n<i>Доставка будет на следующей неделе.</i>" if context.user_data.get('order_for_next_week') else ""
+
+    salads_block = _salads_summary_block(selected_salads)
+    salads_text = f"\n{salads_block}\n" if salads_block else ""
+
+    addr = profile.get('address')
+    phone_line = profile.get('phone')
+    addr_display = html.escape(addr) if addr else "<i>не указан</i>"
+    phone_display = html.escape(phone_line) if phone_line else "<i>не указан</i>"
+    note = ""
+    if not addr or not phone_line:
+        note = "\n\n<i>Недостающие данные мы уточним у вас после оформления заказа.</i>"
+
+    confirm_text = (
+        f"<b>Подтвердите заказ</b>\n\n"
+        f"<b>День:</b> {html.escape(day)}\n"
+        f"<b>Количество:</b> {html.escape(str(count))}\n"
+        f"<b>Меню:</b>\n{menu_lines_html}\n"
+        f"{salads_text}\n"
+        f"<b>Сумма к оплате:</b> {total_cost} лари\n\n"
+        f"<b>Адрес доставки:</b>\n{addr_display}\n"
+        f"<b>Телефон:</b> {phone_display}{week_notice}{note}"
+    )
+    inline_markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Подтверждаю", callback_data="confirm_accept"),
+            InlineKeyboardButton("Назад", callback_data="confirm_back"),
+        ]
+    ])
+    await update.message.reply_text(
+        confirm_text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=inline_markup,
+    )
+    return CONFIRM
+
 async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(update.message.from_user, f"select_count: {update.message.text}")
     raw_text = (update.message.text or "").strip()
@@ -2745,6 +3425,10 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['selected_count'] = count
 
     if context.user_data.get('weekly_mode'):
+        context.user_data.pop('selected_salads', None)
+        context.user_data.pop('pending_salad_name', None)
+        context.user_data.pop('awaiting_salad_choice', None)
+        context.user_data.pop('awaiting_salad_count', None)
         week_start_iso = context.user_data.get('order_week_start')
         week_start_date = None
         if week_start_iso:
@@ -2797,95 +3481,235 @@ async def select_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('weekly_duplicate_days', None)
         return await _weekly_prepare_confirmation(update, context)
 
-    day = context.user_data.get('selected_day', '(не выбран)')
-    week_start_iso = context.user_data.get('order_week_start')
-    week_start_date = None
-    if week_start_iso:
-        try:
-            week_start_date = date.fromisoformat(str(week_start_iso))
-        except Exception:
-            week_start_date = None
-    menu_data = load_menu()
-    menu_for_day = menu_data['menu'].get(day, '') if menu_data else ''
-    if isinstance(menu_for_day, list):
-        menu_for_day_text = ", ".join(menu_for_day)
-    else:
-        menu_for_day_text = str(menu_for_day)
+    return await _prompt_salad_choice(update, context)
 
-    context.user_data['menu_for_day'] = menu_for_day_text
-
-    same = find_user_order_same_day(update.effective_user.id, day, week_start_date)
-    if same:
-        oid, payload = same
-        try:
-            prev_cnt = int(str(payload.get('count', 1)).split()[0])
-        except Exception:
-            prev_cnt = 1
-        context.user_data['duplicate_target'] = {
-            'order_id': oid,
-            'prev_count': prev_cnt,
-            'day': day,
-        }
-        msg = (
-            f"На <b>{html.escape(day)}</b> у вас уже есть заказ: "
-            f"<code>/order {html.escape(oid)}</code>\n\n"
-            "Что сделать с предыдущим заказом?"
-        )
-        await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=get_duplicate_resolution_keyboard())
-        return DUPLICATE
-
-    profile = context.user_data.get('profile')
-    if not profile:
-        profile = get_user_profile(update.effective_user.id)
-        if profile:
-            context.user_data['profile'] = profile
-    profile = profile or {}
-
-    context.user_data['pending_order'] = {
-        'day': day,
-        'count': count,
-        'menu': menu_for_day_text,
-    }
-
-    menu_lines_html = "\n".join(
-        f" - {html.escape(it.strip())}" for it in str(menu_for_day_text).split(',') if it.strip()
-    )
+async def salad_picker_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query:
+        return SALAD_CHOICE
+    await query.answer()
+    log_user_action(query.from_user, f"salad_picker_toggle:{query.data}")
+    state = _get_salad_picker_state(context)
+    if not state:
+        return SALAD_CHOICE
+    data = query.data or ""
     try:
-        count_int = int(str(count))
+        idx = int(data.split(":", 1)[1])
     except Exception:
-        count_int = 1
-    cost_lari = count_int * PRICE_LARI
-    week_notice = "\n<i>Доставка будет на следующей неделе.</i>" if context.user_data.get('order_for_next_week') else ""
+        return SALAD_CHOICE
+    selection = set(_salad_picker_selected(state))
+    if idx in selection:
+        selection.remove(idx)
+    else:
+        selection.add(idx)
+    state['selection'] = sorted(selection)
+    _set_salad_picker_state(context, state)
+    await _salad_picker_refresh_message(query, state)
+    return SALAD_CHOICE
 
-    addr = profile.get('address')
-    phone_line = profile.get('phone')
-    addr_display = html.escape(addr) if addr else "<i>не указан</i>"
-    phone_display = html.escape(phone_line) if phone_line else "<i>не указан</i>"
-    note = ""
-    if not addr or not phone_line:
-        note = "\n\n<i>Недостающие данные мы уточним у вас после оформления заказа.</i>"
+async def salad_picker_select_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query:
+        return SALAD_CHOICE
+    await query.answer()
+    log_user_action(query.from_user, "salad_picker_select_all")
+    state = _get_salad_picker_state(context)
+    if not state:
+        return SALAD_CHOICE
+    state['selection'] = list(range(len(NEW_YEAR_SALADS)))
+    _set_salad_picker_state(context, state)
+    await _salad_picker_refresh_message(query, state)
+    return SALAD_CHOICE
 
-    confirm_text = (
-        f"<b>Подтвердите заказ</b>\n\n"
-        f"<b>День:</b> {html.escape(day)}\n"
-        f"<b>Количество:</b> {html.escape(str(count))}\n"
-        f"<b>Меню:</b>\n{menu_lines_html}\n\n"
-        f"<b>Сумма к оплате:</b> {cost_lari} лари\n\n"
-        f"<b>Адрес доставки:</b>\n{addr_display}\n"
-        f"<b>Телефон:</b> {phone_display}{week_notice}{note}"
+async def salad_picker_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query:
+        return SALAD_CHOICE
+    await query.answer()
+    log_user_action(query.from_user, "salad_picker_clear")
+    state = _get_salad_picker_state(context)
+    if not state:
+        return SALAD_CHOICE
+    state['selection'] = []
+    _set_salad_picker_state(context, state)
+    await _salad_picker_refresh_message(query, state)
+    return SALAD_CHOICE
+
+async def salad_picker_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if query:
+        await query.answer()
+    log_user_action(update.effective_user, "salad_picker_cancel")
+    context.user_data.pop('weekly_salads', None)
+    context.user_data.pop('weekly_salads_done', None)
+    context.user_data.pop('selected_salads', None)
+    _clear_salad_flow_state(context)
+    if query:
+        try:
+            await query.edit_message_text(
+                "Выбор салатов отменен.",
+                parse_mode=ParseMode.HTML,
+            )
+        except BadRequest:
+            pass
+    return await back_to_count(update, context)
+
+async def salad_picker_continue(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query:
+        return SALAD_CHOICE
+    await query.answer()
+    log_user_action(query.from_user, "salad_picker_continue")
+    state = _get_salad_picker_state(context)
+    if not state:
+        return SALAD_CHOICE
+    selection = _salad_picker_selected(state)
+    flow = str(state.get('flow') or 'single')
+    if not selection:
+        if flow == 'weekly':
+            context.user_data['weekly_salads'] = []
+            context.user_data['weekly_salads_done'] = True
+            _clear_salad_flow_state(context)
+            return await _weekly_prepare_confirmation(update, context)
+        context.user_data.pop('selected_salads', None)
+        _clear_salad_flow_state(context)
+        return await _continue_single_order_after_count(update, context)
+
+    existing_salads = _normalize_salads(
+        context.user_data.get('weekly_salads') if flow == 'weekly' else context.user_data.get('selected_salads')
     )
-    inline_markup = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Подтверждаю", callback_data="confirm_accept"),
-            InlineKeyboardButton("Назад", callback_data="confirm_back"),
-        ]
-    ])
-    await update.message.reply_text(
-        confirm_text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=inline_markup,
-    )
-    return CONFIRM
+    existing_counts = _salads_counts_map(existing_salads)
+    counts = {idx: existing_counts.get(idx, 1) for idx in selection}
+    counter_state = {
+        'selection': selection,
+        'counts': counts,
+        'flow': flow,
+        'delivery_day': state.get('delivery_day') or "",
+    }
+    _set_salad_counter_state(context, counter_state)
+    context.user_data['awaiting_salad_choice'] = False
+    context.user_data['awaiting_salad_count'] = True
+    try:
+        await query.edit_message_text(
+            _salad_counter_text(counter_state),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_salad_counter_keyboard(counter_state),
+        )
+    except BadRequest as exc:
+        if 'Message is not modified' not in str(exc):
+            raise
+    return SALAD_COUNT
+
+async def salad_counter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query or not query.data:
+        return SALAD_COUNT
+    await query.answer()
+    data = query.data
+    if not data.startswith("salad_count:"):
+        return SALAD_COUNT
+    parts = data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    target = parts[2] if len(parts) > 2 else ""
+    state = _get_salad_counter_state(context)
+    if not state:
+        return SALAD_COUNT
+    flow = str(state.get('flow') or 'single')
+
+    if action == "noop":
+        return SALAD_COUNT
+    if action in {"inc", "dec"}:
+        try:
+            idx = int(target)
+        except Exception:
+            return SALAD_COUNT
+        counts = state.get('counts') or {}
+        try:
+            current = int(counts.get(idx, 1))
+        except Exception:
+            current = 1
+        if action == "inc":
+            current += 1
+        elif action == "dec":
+            current = max(1, current - 1)
+        counts[idx] = current
+        state['counts'] = counts
+        _set_salad_counter_state(context, state)
+        await _salad_counter_refresh_markup(query, state)
+        return SALAD_COUNT
+    if action == "back":
+        if flow == 'weekly':
+            context.user_data['weekly_salads_done'] = False
+            context.user_data.pop('awaiting_salad_count', None)
+            picker_state = _get_weekly_picker_state(context)
+            if picker_state:
+                try:
+                    await query.edit_message_text(
+                        _weekly_picker_text(picker_state),
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=_weekly_picker_keyboard(picker_state),
+                    )
+                except BadRequest as exc:
+                    if 'Message is not modified' not in str(exc):
+                        raise
+                return WEEKLY_DAY_PICK
+            return await back_to_day(update, context)
+        selection = state.get('selection') or []
+        picker_state = {
+            'selection': selection,
+            'flow': flow,
+            'delivery_day': state.get('delivery_day') or "",
+        }
+        _set_salad_picker_state(context, picker_state)
+        context.user_data['awaiting_salad_choice'] = True
+        context.user_data.pop('awaiting_salad_count', None)
+        try:
+            await query.edit_message_text(
+                _salad_picker_text(picker_state),
+                parse_mode=ParseMode.HTML,
+                reply_markup=_salad_picker_keyboard(picker_state),
+            )
+        except BadRequest as exc:
+            if 'Message is not modified' not in str(exc):
+                raise
+        return SALAD_CHOICE
+    if action == "cancel":
+        context.user_data.pop('weekly_salads', None)
+        context.user_data.pop('weekly_salads_done', None)
+        context.user_data.pop('selected_salads', None)
+        _clear_salad_flow_state(context)
+        try:
+            await query.edit_message_text(
+                "Выбор салатов отменен.",
+                parse_mode=ParseMode.HTML,
+            )
+        except BadRequest:
+            pass
+        return await back_to_count(update, context)
+    if action == "done":
+        selection = state.get('selection') or []
+        counts = state.get('counts') or {}
+        salads: list[dict] = []
+        for idx in selection:
+            if not (0 <= idx < len(NEW_YEAR_SALADS)):
+                continue
+            try:
+                count = int(counts.get(idx, 1))
+            except Exception:
+                count = 1
+            if count <= 0:
+                continue
+            salads.append({"name": NEW_YEAR_SALADS[idx], "count": count})
+        if flow == 'weekly':
+            context.user_data['weekly_salads'] = salads
+            context.user_data['weekly_salads_done'] = True
+        else:
+            context.user_data['selected_salads'] = salads
+        _clear_salad_flow_state(context)
+        if flow == 'weekly':
+            return await _weekly_prepare_confirmation(update, context)
+        return await _continue_single_order_after_count(update, context)
+    return SALAD_COUNT
 
 # --- Разрешение ситуации с дублирующимся заказом на тот же день ---
 async def _process_phone_submission(update: Update, context: ContextTypes.DEFAULT_TYPE, phone_value: str) -> int:
@@ -2928,6 +3752,7 @@ async def _process_phone_submission(update: Update, context: ContextTypes.DEFAUL
     day = pend.get('day', context.user_data.get('selected_day', '(не выбран)'))
     count = pend.get('count', context.user_data.get('selected_count', '(не выбрано)'))
     menu_for_day_text = pend.get('menu', context.user_data.get('menu_for_day', ''))
+    selected_salads = _normalize_salads(pend.get('salads') or context.user_data.get('selected_salads'))
     addr = profile.get('address', '')
     phone_line = profile.get('phone') or "вы можете добавить телефон через кнопку ниже"
     menu_lines_html = "\n".join(
@@ -2937,14 +3762,19 @@ async def _process_phone_submission(update: Update, context: ContextTypes.DEFAUL
         count_int = int(str(count))
     except Exception:
         count_int = 1
-    cost_lari = count_int * PRICE_LARI
+    base_cost = count_int * PRICE_LARI
+    salads_cost = _salads_cost(selected_salads)
+    total_cost = base_cost + salads_cost
     week_notice = "\n<i>Доставка будет на следующей неделе.</i>" if context.user_data.get('order_for_next_week') else ""
+    salads_block = _salads_summary_block(selected_salads)
+    salads_text = f"\n{salads_block}\n" if salads_block else ""
     confirm_text = (
         f"<b>Подтвердите заказ</b>\n\n"
         f"<b>День:</b> {html.escape(day)}\n"
         f"<b>Количество:</b> {html.escape(str(count))}\n"
         f"<b>Меню:</b>\n{menu_lines_html}\n\n"
-        f"<b>Сумма к оплате:</b> {cost_lari} лари\n\n"
+        f"{salads_text}"
+        f"<b>Сумма к оплате:</b> {total_cost} лари\n\n"
         f"<b>Адрес доставки:</b>\n{html.escape(addr or '')}\n"
         f"<b>Телефон:</b> {html.escape(phone_line)}\n\n"
         f"Все верно?{week_notice}"
@@ -3032,12 +3862,15 @@ async def _finalize_single_order(update: Update, context: ContextTypes.DEFAULT_T
     day = pend.get('day', context.user_data.get('selected_day', '(не выбран)'))
     count = pend.get('count', context.user_data.get('selected_count', '1'))
     menu_for_day = pend.get('menu', context.user_data.get('menu_for_day', ''))
+    selected_salads = _normalize_salads(pend.get('salads') or context.user_data.get('selected_salads'))
 
     try:
         count_int = int(str(count))
     except Exception:
         count_int = 1
-    cost_lari = count_int * PRICE_LARI
+    base_cost = count_int * PRICE_LARI
+    salads_cost = _salads_cost(selected_salads)
+    total_cost = base_cost + salads_cost
     user = update.effective_user or message.from_user
     username = f"@{user.username}" if user.username else "(нет username)"
     order_id = make_order_id(user.id)
@@ -3048,6 +3881,7 @@ async def _finalize_single_order(update: Update, context: ContextTypes.DEFAULT_T
         "day": day,
         "count": count,
         "menu": menu_for_day,
+        "salads": selected_salads,
         "address": profile.get('address'),
         "phone": profile.get('phone'),
         "status": "new",
@@ -3059,15 +3893,23 @@ async def _finalize_single_order(update: Update, context: ContextTypes.DEFAULT_T
     menu_lines_html = "\n".join(
         f"• {html.escape(it.strip())}" for it in str(menu_for_day).split(',') if it.strip()
     )
+    salads_block = _salads_summary_block(selected_salads)
+    salads_text = f"\n{salads_block}" if salads_block else ""
     created_line = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_at))
+    sum_line = f"<b>Сумма:</b> {total_cost} лари"
+    if salads_cost:
+        sum_line += f" (обеды {base_cost} + салаты {salads_cost})"
+    else:
+        sum_line += f" (по {PRICE_LARI} лари за обед)"
     admin_text = (
         f"<b>🍱 Новый заказ</b> <code>{html.escape(order_id)}</code>\n"
         f"<b>Создан:</b> {created_line}\n"
         f"<b>Клиент:</b> {admin_link_html(user)} ({html.escape(username)})\n"
         f"<b>День:</b> {html.escape(day)}\n"
         f"<b>Меню:</b>\n{menu_lines_html}\n"
+        f"{salads_text}\n"
         f"<b>Количество:</b> {html.escape(str(count))}\n"
-        f"<b>Сумма:</b> {cost_lari} лари (по {PRICE_LARI} лари за обед)\n"
+        f"{sum_line}\n"
         f"<b>Адрес:</b>\n<blockquote>{html.escape(profile.get('address') or '')}</blockquote>\n"
         f"<b>Телефон:</b> {html.escape(profile.get('phone') or 'не указан')}\n\n"
         f"<b>Быстрый просмотр:</b> <code>/order {html.escape(order_id)}</code>"
@@ -3082,6 +3924,10 @@ async def _finalize_single_order(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data.pop('pending_order', None)
     context.user_data.pop('order_for_next_week', None)
     context.user_data.pop('order_week_start', None)
+    context.user_data.pop('selected_salads', None)
+    context.user_data.pop('pending_salad_name', None)
+    context.user_data.pop('awaiting_salad_choice', None)
+    context.user_data.pop('awaiting_salad_count', None)
 
     week_line = ""
     if is_next_week_delivery and delivery_week_iso:
@@ -3099,8 +3945,9 @@ async def _finalize_single_order(update: Update, context: ContextTypes.DEFAULT_T
             f"🧾 <b>ID заказа:</b> <code>{html.escape(order_id)}</code>\n"
             f"📅 <b>Доставка:</b> {html.escape(day)}{week_line}\n"
             f"⏰ <b>Окно:</b> 12:30-15:30\n"
-            f"💸 <b>Сумма:</b> {cost_lari} лари\n"
+            f"💸 <b>Сумма:</b> {total_cost} лари\n"
             f"💳 Оплата: наличными курьеру или переводом.\n\n"
+            f"{_salads_summary_block(selected_salads) + '\n\n' if selected_salads else ''}"
             f"<b>🔎 Посмотреть детали позже:</b>\n"
             f"<code>/order {html.escape(order_id)}</code>"
         ),
@@ -3263,7 +4110,7 @@ async def broadcast_menu_update_callback(update: Update, context: ContextTypes.D
     query = update.callback_query
     await query.answer()
     
-    if query.from_user.id != ADMIN_ID:
+    if not is_admin_id(query.from_user.id):
         await query.answer("Только для админа", show_alert=True)
         return
 
@@ -3342,8 +4189,12 @@ async def _finalize_weekly_order(update: Update, context: ContextTypes.DEFAULT_T
 
     days = list(counts_map.keys()) or context.user_data.get('weekly_days_to_order') or context.user_data.get('weekly_days') or []
     days = [day for day in days if counts_map.get(day, 0) > 0]
+    weekly_salads = _normalize_salads(context.user_data.get('weekly_salads'))
+    if not days and weekly_salads:
+        fallback_days = context.user_data.get('weekly_days_to_order') or context.user_data.get('weekly_days') or []
+        days = [str(fallback_days[0])] if fallback_days else []
 
-    if not days:
+    if not days and not weekly_salads:
         await update.message.reply_text(
             "Не удалось определить дни доставки. Попробуйте начать оформление заново.",
             reply_markup=get_main_menu_keyboard(),
@@ -3361,26 +4212,30 @@ async def _finalize_weekly_order(update: Update, context: ContextTypes.DEFAULT_T
         except Exception:
             week_start_date = None
     total_meals = _bulk_total_meals({day: counts_map.get(day, 0) for day in days})
-    total_cost = total_meals * PRICE_LARI
+    salads_cost = _salads_cost(weekly_salads)
+    total_cost = total_meals * PRICE_LARI + salads_cost
 
     user = update.effective_user or message.from_user
     username = f"@{user.username}" if user.username else "(нет username)"
     created_at = int(time.time())
     created_orders: list[dict] = []
 
+    salads_day = days[0] if weekly_salads and days else None
     for day in days:
         day_count = int(counts_map.get(day, 0))
-        if day_count <= 0:
+        if day_count <= 0 and not (weekly_salads and day == salads_day):
             continue
         menu_items = weekly_menu.get(day) or []
         menu_text = ", ".join(menu_items)
         order_id = make_order_id(user.id)
+        order_salads = weekly_salads if salads_day and day == salads_day else []
         save_order(order_id, {
             "user_id": user.id,
             "username": user.username,
             "day": day,
             "count": str(day_count),
             "menu": menu_text,
+            "salads": order_salads,
             "address": profile.get('address'),
             "phone": profile.get('phone'),
             "status": "new",
@@ -3394,15 +4249,23 @@ async def _finalize_weekly_order(update: Update, context: ContextTypes.DEFAULT_T
                 'order_id': order_id,
                 'menu_items': menu_items,
                 'count': day_count,
+                'salads': order_salads,
             }
         )
 
     menu_blocks = []
+    admin_day_blocks = []
     for entry in created_orders:
         items_html = "\n".join(f"• {html.escape(it)}" for it in entry['menu_items']) if entry['menu_items'] else "• (меню не указано)"
+        salads_block = _salads_summary_block(_normalize_salads(entry.get('salads')))
+        salads_text = f"\n{salads_block}" if salads_block else ""
         menu_blocks.append(
             f"<b>{html.escape(entry['day'])}</b> — {entry['count']} {_ru_obed_plural(entry['count'])}\n"
-            f"{items_html}\n<code>/order {html.escape(entry['order_id'])}</code>"
+            f"{items_html}{salads_text}\n<code>/order {html.escape(entry['order_id'])}</code>"
+        )
+        admin_day_blocks.append(
+            f"<b>{html.escape(entry['day'])}</b> — {entry['count']} {_ru_obed_plural(entry['count'])} "
+            f"(<code>/order {html.escape(entry['order_id'])}</code>)"
         )
 
     delivery_hint = _weekly_delivery_hint(context)
@@ -3414,10 +4277,13 @@ async def _finalize_weekly_order(update: Update, context: ContextTypes.DEFAULT_T
         f"<b>Адрес:</b>\n<blockquote>{html.escape(profile.get('address') or '')}</blockquote>",
         f"<b>Телефон:</b> {html.escape(profile.get('phone') or 'не указан')}",
     ]
+    if weekly_salads:
+        admin_lines.extend(["", _salads_summary_block(weekly_salads)])
+        admin_lines.append(f"<i>Салаты доставим в {html.escape(salads_day or '')}.</i>")
     if delivery_hint:
         admin_lines.append(delivery_hint)
     admin_lines.extend(["", "<b>Дни:</b>"])
-    admin_lines.extend(menu_blocks)
+    admin_lines.extend(admin_day_blocks)
     await notify_admins(
         context.bot,
         "\n".join(admin_lines),
@@ -3432,6 +4298,9 @@ async def _finalize_weekly_order(update: Update, context: ContextTypes.DEFAULT_T
         f"🍽️ <b>Всего обедов:</b> {total_meals} {_ru_obed_plural(total_meals)}",
         f"💸 <b>Сумма:</b> {total_cost} лари",
     ]
+    if weekly_salads:
+        user_lines.extend(["", _salads_summary_block(weekly_salads)])
+        user_lines.append(f"<i>Салаты доставим в {html.escape(salads_day or '')}.</i>")
     if week_start_date:
         if context.user_data.get('order_for_next_week'):
             user_lines.append(f"🗓️ Доставка с {week_start_date.strftime('%d.%m.%Y')} (следующая неделя)")
@@ -3505,6 +4374,10 @@ async def back_to_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return ORDER_COUNT
     if message:
+        context.user_data.pop('selected_salads', None)
+        context.user_data.pop('pending_salad_name', None)
+        context.user_data.pop('awaiting_salad_choice', None)
+        context.user_data.pop('awaiting_salad_count', None)
         await message.reply_text(
             "<b>Сколько обедов заказать?</b>",
             parse_mode=ParseMode.HTML,
@@ -3534,6 +4407,10 @@ async def back_to_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=keyboard,
         )
         return MENU
+    context.user_data.pop('selected_salads', None)
+    context.user_data.pop('pending_salad_name', None)
+    context.user_data.pop('awaiting_salad_choice', None)
+    context.user_data.pop('awaiting_salad_count', None)
     await update.message.reply_text(
         "<b>Выберите день недели:</b>",
         parse_mode=ParseMode.HTML,
@@ -3657,6 +4534,7 @@ async def resolve_duplicate_order(update: Update, context: ContextTypes.DEFAULT_
     # Текущий выбор пользователя
     count = context.user_data.get('selected_count')
     menu_for_day_text = context.user_data.get('menu_for_day', '')
+    selected_salads = _normalize_salads(context.user_data.get('selected_salads'))
     # Обновим профиль
     profile = context.user_data.get('profile')
     if not profile:
@@ -3682,25 +4560,31 @@ async def resolve_duplicate_order(update: Update, context: ContextTypes.DEFAULT_
             count_int = int(str(count))
         except Exception:
             count_int = 1
-        cost_lari = count_int * PRICE_LARI
+        base_cost = count_int * PRICE_LARI
+        salads_cost = _salads_cost(selected_salads)
+        total_cost = base_cost + salads_cost
         if has_address:
             context.user_data['pending_order'] = {
                 'day': day,
                 'count': count,
                 'menu': menu_for_day_text,
+                'salads': selected_salads,
             }
             addr = profile.get('address')
             phone_line = profile.get('phone') or "вы можете добавить телефон через кнопку ниже"
             menu_lines_html = "\n".join(
                 f" - {html.escape(it.strip())}" for it in str(menu_for_day_text).split(',') if it.strip()
             )
+            salads_block = _salads_summary_block(selected_salads)
+            salads_text = f"\n{salads_block}\n" if salads_block else ""
             week_notice = "\n<i>Доставка будет на следующей неделе.</i>" if context.user_data.get('order_for_next_week') else ""
             confirm_text = (
                 f"<b>Подтвердите заказ</b>\n\n"
                 f"<b>День:</b> {html.escape(day)}\n"
                 f"<b>Количество:</b> {html.escape(str(count))}\n"
                 f"<b>Меню:</b>\n{menu_lines_html}\n\n"
-                f"<b>Сумма к оплате:</b> {cost_lari} лари\n\n"
+                f"{salads_text}"
+                f"<b>Сумма к оплате:</b> {total_cost} лари\n\n"
                 f"<b>Адрес доставки:</b>\n{html.escape(addr or '')}\n"
                 f"<b>Телефон:</b> {html.escape(phone_line)}\n\n"
                 f"Все верно?{week_notice}"
@@ -3717,11 +4601,14 @@ async def resolve_duplicate_order(update: Update, context: ContextTypes.DEFAULT_
             menu_lines_html = "\n".join(
                 f"• {html.escape(it.strip())}" for it in str(menu_for_day_text).split(',') if it.strip()
             )
+            salads_block = _salads_summary_block(selected_salads)
+            salads_text = f"\n{salads_block}\n" if salads_block else ""
             week_notice = "\n<i>Доставка будет на следующей неделе.</i>" if context.user_data.get('order_for_next_week') else ""
             reply_text = (
                 f"🎯 <b>Заказ почти готов</b>\n\n"
                 f"📅 <b>{html.escape(day)}</b>\n"
                 f"🍽️ <b>Состав:</b>\n{menu_lines_html}\n"
+                f"{salads_text}"
                 f"🔢 <b>Количество:</b> {html.escape(str(count))}\n\n"
                 f"📍 Остался 1 шаг - укажите <b>адрес доставки</b> одним сообщением:\n"
                 f"• улица и дом\n"
@@ -3742,31 +4629,49 @@ async def resolve_duplicate_order(update: Update, context: ContextTypes.DEFAULT_
         prev_cnt = dup.get('prev_count') or 0
         new_total = max(1, int(prev_cnt) + add_cnt)
         orders = _load_orders()
+        added_salads = _normalize_salads(context.user_data.get('selected_salads'))
+        merged_salads: list[dict] = []
         if oid in orders:
             orders[oid]['count'] = str(new_total)
+            if added_salads:
+                merged_salads = _merge_salads(orders[oid].get('salads'), added_salads)
+                orders[oid]['salads'] = merged_salads
             _save_orders(orders)
         # Уведомим админа об изменении
         who = admin_link_html(update.effective_user)
+        salads_block = _salads_summary_block(merged_salads)
+        salads_text = f"\n{salads_block}" if salads_block else ""
         await notify_admins(
             context.bot,
             (
                 f"<b>✏️ Обновление заказа</b> <code>{html.escape(oid)}</code>\n"
                 f"Кем: {who} (user_id={update.effective_user.id})\n"
                 f"Количество: было {prev_cnt}, стало {new_total}"
+                f"{salads_text}"
             ),
             parse_mode=ParseMode.HTML,
         )
         # Сообщение пользователю
+        salads_note = ""
+        if merged_salads:
+            salads_lines = _salads_lines_html(merged_salads)
+            if salads_lines:
+                salads_note = f"\n\n<b>Салаты:</b>\n{salads_lines}"
         await update.message.reply_text(
             (
                 f"<b>Готово!</b> Обновил ваш заказ на <b>{html.escape(day)}</b>.\n"
                 f"Текущее количество: <b>{new_total} {_ru_obed_plural(new_total)}</b>\n"
                 f"<code>/order {html.escape(oid)}</code>"
+                f"{salads_note}"
             ),
             parse_mode=ParseMode.HTML,
             reply_markup=get_after_confirm_keyboard(),
         )
         context.user_data.pop('duplicate_target', None)
+        context.user_data.pop('selected_salads', None)
+        context.user_data.pop('pending_salad_name', None)
+        context.user_data.pop('awaiting_salad_choice', None)
+        context.user_data.pop('awaiting_salad_count', None)
         return MENU
 
     # Непредвиденный ввод — спросим снова
@@ -4033,6 +4938,7 @@ async def address_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         day = pend.get('day', context.user_data.get('selected_day', '(не выбран)'))
         count = pend.get('count', context.user_data.get('selected_count', '(не выбрано)'))
         menu_for_day_text = pend.get('menu', context.user_data.get('menu_for_day', ''))
+        selected_salads = _normalize_salads(pend.get('salads') or context.user_data.get('selected_salads'))
         addr = profile.get('address', '')
         phone_line = profile.get('phone') or "вы можете добавить телефон через кнопку ниже"
         menu_lines_html = "\n".join(
@@ -4042,13 +4948,18 @@ async def address_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
             count_int = int(str(count))
         except Exception:
             count_int = 1
-        cost_lari = count_int * PRICE_LARI
+        base_cost = count_int * PRICE_LARI
+        salads_cost = _salads_cost(selected_salads)
+        total_cost = base_cost + salads_cost
+        salads_block = _salads_summary_block(selected_salads)
+        salads_text = f"\n{salads_block}\n" if salads_block else ""
         confirm_text = (
             f"<b>Подтвердите заказ</b>\n\n"
             f"<b>День:</b> {html.escape(day)}\n"
             f"<b>Количество:</b> {html.escape(str(count))}\n"
             f"<b>Меню:</b>\n{menu_lines_html}\n\n"
-            f"<b>Сумма к оплате:</b> {cost_lari} лари\n\n"
+            f"{salads_text}"
+            f"<b>Сумма к оплате:</b> {total_cost} лари\n\n"
             f"<b>Адрес доставки:</b>\n{html.escape(addr or '')}\n"
             f"<b>Телефон:</b> {html.escape(phone_line)}\n\n"
             f"Все верно?"
@@ -4077,6 +4988,7 @@ async def address_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
             day = pend.get('day', context.user_data.get('selected_day', '(не выбран)'))
             count = pend.get('count', context.user_data.get('selected_count', '(не выбрано)'))
             menu_for_day_text = pend.get('menu', context.user_data.get('menu_for_day', ''))
+            selected_salads = _normalize_salads(pend.get('salads') or context.user_data.get('selected_salads'))
             addr = profile.get('address', '')
             phone_line = profile.get('phone') or "вы можете добавить телефон через кнопку ниже"
             menu_lines_html = "\n".join(
@@ -4086,13 +4998,18 @@ async def address_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 count_int = int(str(count))
             except Exception:
                 count_int = 1
-            cost_lari = count_int * PRICE_LARI
+            base_cost = count_int * PRICE_LARI
+            salads_cost = _salads_cost(selected_salads)
+            total_cost = base_cost + salads_cost
+            salads_block = _salads_summary_block(selected_salads)
+            salads_text = f"\n{salads_block}\n" if salads_block else ""
             confirm_text = (
                 f"<b>Подтвердите заказ</b>\n\n"
                 f"<b>День:</b> {html.escape(day)}\n"
                 f"<b>Количество:</b> {html.escape(str(count))}\n"
                 f"<b>Меню:</b>\n{menu_lines_html}\n\n"
-                f"<b>Сумма к оплате:</b> {cost_lari} лари\n\n"
+                f"{salads_text}"
+                f"<b>Сумма к оплате:</b> {total_cost} лари\n\n"
                 f"<b>Адрес доставки:</b>\n{html.escape(addr or '')}\n"
                 f"<b>Телефон:</b> {html.escape(phone_line)}\n\n"
                 f"Все верно?"
@@ -4147,6 +5064,9 @@ async def order_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     menu_lines_html = "\n".join(
         f"• {html.escape(it.strip())}" for it in str(menu_for_day).split(',') if it.strip()
     )
+    salads = _normalize_salads(data.get("salads"))
+    salads_block = _salads_summary_block(salads)
+    salads_text = f"\n{salads_block}\n" if salads_block else ""
 
     # Парсим количество и считаем сумму
     raw_count = data.get("count", 1)
@@ -4154,18 +5074,26 @@ async def order_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count_int = int(str(raw_count).split()[0])
     except Exception:
         count_int = 1
-    cost_lari = count_int * PRICE_LARI
+    base_cost = count_int * PRICE_LARI
+    salads_cost = _salads_cost(salads)
+    total_cost = base_cost + salads_cost
 
     status = data.get("status") or "-"
 
+    sum_line = f"<b>Сумма:</b> {total_cost} лари"
+    if salads_cost:
+        sum_line += f" (обеды {base_cost} + салаты {salads_cost})"
+    else:
+        sum_line += f" (по {PRICE_LARI} лари за обед)"
     text_html = (
         f"<b>Заказ</b> <code>{html.escape(order_id)}</code>\n"
         f"<b>Создан:</b> {created_line}\n"
         f"<b>Статус:</b> {html.escape(status)}\n"
         f"<b>День:</b> {html.escape(str(data.get('day') or ''))}\n"
         f"<b>Меню:</b>\n{menu_lines_html}\n"
+        f"{salads_text}"
         f"<b>Количество:</b> {count_int}\n"
-        f"<b>Сумма:</b> {cost_lari} лари (по {PRICE_LARI} лари за обед)\n"
+        f"{sum_line}\n"
         f"<b>Адрес:</b>\n<blockquote>{html.escape(str(data.get('address') or ''))}</blockquote>\n"
         f"<b>Телефон:</b> {html.escape(phone_line)}"
     )
@@ -4574,6 +5502,10 @@ def _build_fallback_hint(context: ContextTypes.DEFAULT_TYPE, is_admin: bool) -> 
             "Мы на шаге <b>подтверждения заказа</b>. Используйте кнопки «Подтверждаю», "
             "«Изменить адрес» или «Изменить телефон», либо отправьте телефон."
         )
+    if context.user_data.get('awaiting_salad_count'):
+        return "Настройте <b>количество салатов</b> кнопками под сообщением."
+    if context.user_data.get('awaiting_salad_choice'):
+        return "Выберите салаты кнопками под сообщением или нажмите «Продолжить» без выбора."
     if context.user_data.get('selected_count'):
         return (
             "Осталось <b>указать адрес доставки</b>. Напишите адрес одним сообщением "
@@ -4616,6 +5548,12 @@ BUTTON_TEXTS = [
     "Выбрать день заново",
     "Понедельник", "Вторник", "Среда", "Четверг", "Пятница",
     "1 обед", "2 обеда", "3 обеда", "4 обеда",
+    "1 салат", "2 салата", "3 салата", "4 салата",
+    "Без салатов",
+    "Салат «Сельдь под шубой» (500 г.)",
+    "Салат «Оливье» (500 г.)",
+    "Салат с крабовыми палочками (500 г.)",
+    "Салат «Мимоза» классический (500 г.)",
     "Подтверждаю",
     "Изменить адрес",
     "Изменить телефон",
@@ -4753,6 +5691,9 @@ if __name__ == "__main__":
                 CallbackQueryHandler(weekly_picker_toggle, pattern=r"^weekly_toggle:\d+$"),
                 CallbackQueryHandler(weekly_picker_select_all, pattern=r"^weekly_all$"),
                 CallbackQueryHandler(weekly_picker_clear, pattern=r"^weekly_none$"),
+                CallbackQueryHandler(weekly_salad_toggle, pattern=r"^weekly_salad_toggle:\d+$"),
+                CallbackQueryHandler(weekly_salad_select_all, pattern=r"^weekly_salad_all$"),
+                CallbackQueryHandler(weekly_salad_clear, pattern=r"^weekly_salad_none$"),
                 CallbackQueryHandler(weekly_picker_continue, pattern=r"^weekly_continue$"),
                 CallbackQueryHandler(weekly_picker_cancel, pattern=r"^weekly_cancel$"),
                 MessageHandler(filters.Regex("^Заказать на всю неделю$"), order_week_lunch),
@@ -4774,6 +5715,32 @@ if __name__ == "__main__":
                 MessageHandler(filters.Regex("^В начало$"), start),
                 MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
                 MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
+            ],
+            SALAD_CHOICE: [
+                CallbackQueryHandler(show_menu, pattern=r"^start_show_menu$"),
+                CallbackQueryHandler(start_about, pattern=r"^start_about$"),
+                CallbackQueryHandler(my_orders, pattern=r"^post_my_orders$"),
+                CallbackQueryHandler(salad_picker_toggle, pattern=r"^salad_pick:\d+$"),
+                CallbackQueryHandler(salad_picker_select_all, pattern=r"^salad_pick_all$"),
+                CallbackQueryHandler(salad_picker_clear, pattern=r"^salad_pick_none$"),
+                CallbackQueryHandler(salad_picker_continue, pattern=r"^salad_pick_continue$"),
+                CallbackQueryHandler(salad_picker_cancel, pattern=r"^salad_pick_cancel$"),
+                MessageHandler(filters.Regex("^🔄 В начало$"), start),
+                MessageHandler(filters.Regex("^В начало$"), start),
+                MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
+                MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, fallback),
+            ],
+            SALAD_COUNT: [
+                CallbackQueryHandler(show_menu, pattern=r"^start_show_menu$"),
+                CallbackQueryHandler(start_about, pattern=r"^start_about$"),
+                CallbackQueryHandler(my_orders, pattern=r"^post_my_orders$"),
+                CallbackQueryHandler(salad_counter_callback, pattern=r"^salad_count:"),
+                MessageHandler(filters.Regex("^🔄 В начало$"), start),
+                MessageHandler(filters.Regex("^В начало$"), start),
+                MessageHandler(filters.Regex("^❗ Связаться с человеком$"), contact_human),
+                MessageHandler(filters.Regex("^Связаться с человеком$"), contact_human),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, fallback),
             ],
             UPDATE_ORDER_COUNT: [
                 CallbackQueryHandler(show_menu, pattern=r"^start_show_menu$"),

@@ -40,6 +40,26 @@ def get_count_keyboard():
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
+def get_salad_choice_keyboard(options: list[str]):
+    rows: list[list[KeyboardButton]] = []
+    for item in options:
+        label = str(item).strip()
+        if label:
+            rows.append([KeyboardButton(label)])
+    rows.append([KeyboardButton("Без салатов")])
+    rows.append([KeyboardButton("Назад")])
+    rows.append([KeyboardButton("🔄 В начало"), KeyboardButton("❗ Связаться с человеком")])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+def get_salad_count_keyboard():
+    rows = [
+        [KeyboardButton("1 салат"), KeyboardButton("2 салата")],
+        [KeyboardButton("3 салата"), KeyboardButton("4 салата")],
+        [KeyboardButton("Назад")],
+        [KeyboardButton("🔄 В начало"), KeyboardButton("❗ Связаться с человеком")],
+    ]
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
 def get_count_retry_keyboard():
     rows = [
         [KeyboardButton("1 обед"), KeyboardButton("2 обеда")],
@@ -175,7 +195,13 @@ BULK_DAY_SHORT_LABELS = {
 }
 
 
-def get_bulk_counter_keyboard(state: dict[str, dict], max_per_day: int | None = None) -> InlineKeyboardMarkup:
+def get_bulk_counter_keyboard(
+    state: dict[str, dict],
+    max_per_day: int | None = None,
+    salad_counts: dict[int, int] | None = None,
+    salad_labels: list[str] | None = None,
+    salad_indices: list[int] | None = None,
+) -> InlineKeyboardMarkup:
     """
     Формирует инлайн-клавиатуру с инкрементами/декрементами по дням.
     Ожидается, что state содержит ключи-дни (mon/tue/...) с полями label/count/selected.
@@ -202,6 +228,28 @@ def get_bulk_counter_keyboard(state: dict[str, dict], max_per_day: int | None = 
             InlineKeyboardButton(text=day_text, callback_data=toggle_cb),
             InlineKeyboardButton(text="➕", callback_data=plus_cb),
         ])
+
+    if salad_labels:
+        indices = salad_indices if salad_indices else list(range(len(salad_labels)))
+        if indices:
+            rows.append([InlineKeyboardButton("Новогодние салаты", callback_data="bulk:salad:noop:*")])
+        for idx in indices:
+            if idx < 0 or idx >= len(salad_labels):
+                continue
+            label = salad_labels[idx]
+            try:
+                count = int((salad_counts or {}).get(idx, 0))
+            except Exception:
+                count = 0
+            if count < 0:
+                count = 0
+            minus_cb = f"bulk:salad:dec:{idx}"
+            plus_cb = f"bulk:salad:inc:{idx}"
+            rows.append([
+                InlineKeyboardButton(text="➖", callback_data=minus_cb),
+                InlineKeyboardButton(text=f"{label} {count}", callback_data="bulk:salad:noop:*"),
+                InlineKeyboardButton(text="➕", callback_data=plus_cb),
+            ])
 
     if not rows:
         rows.append([
